@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import math
-import json
 from io import BytesIO
 from supabase import create_client, Client
 
@@ -98,8 +97,8 @@ def deletar_banco():
         try:
             supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
             st.cache_resource.clear()
-        except Exception as e:
-            st.error(f"Erro ao limpar o banco: {e}")
+        except:
+            pass
 
 # =========================
 # MOTOR DE GERAÇÃO
@@ -141,7 +140,7 @@ def gerar_turmas(df, min_a, max_a):
     return pd.DataFrame(turmas_lista)
 
 # =========================
-# CONFIGURAÇÕES
+# CONFIGURAÇÕES E FLUXO
 # =========================
 st.sidebar.header("⚙️ Configurações")
 min_alunos = st.sidebar.number_input("Mínimo por turma", min_value=1, value=30)
@@ -154,9 +153,6 @@ if st.sidebar.button("🗑️ Deletar Planilha do Banco"):
 
 st.title("📊 Planejador Inteligente de Turmas")
 
-# =========================
-# PROCESSAMENTO
-# =========================
 plano_nuvem = carregar_do_banco()
 arquivo = st.file_uploader("📤 Subir Atualização de Planilha", type=["xlsx"])
 
@@ -193,7 +189,7 @@ if arquivo:
         st.error(f"Erro: {e}")
 
 elif not plano_nuvem.empty:
-    st.info("📂 Exibindo dados da nuvem.")
+    st.info("📂 Exibindo dados salvos na nuvem.")
     plano_para_exibir = plano_nuvem.copy()
 
 # =========================
@@ -214,7 +210,6 @@ if not plano_para_exibir.empty:
 
     if supabase and (arquivo is not None or not plano_nuvem.empty):
         try:
-            # Sincronização Inteligente
             dados_db = []
             for row in plano_editado.to_dict(orient="records"):
                 dados_db.append({
@@ -225,27 +220,26 @@ if not plano_para_exibir.empty:
                     "CNPJs": str(row["CNPJs"])
                 })
             
+            # Limpa e reinsere
             supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
             supabase.table("planejamentos_turmas").insert(dados_db).execute()
-            st.toast("Nuvem atualizada!", icon="☁️")
+            st.toast("Sincronizado!", icon="☁️")
         except Exception as e:
             st.error(f"Erro de sincronização: {e}")
 
-    # Localizador
-    st.subheader("🔍 Busca por CNPJ")
-    busca = st.text_input("Digite o CNPJ:")
+    # Ferramentas extras
+    st.subheader("🔍 Localizador de CNPJ")
+    busca = st.text_input("Digite o CNPJ para localizar:")
     if busca:
         res = plano_editado[plano_editado["CNPJs"].astype(str).str.contains(busca, na=False)]
         if not res.empty:
             st.dataframe(res[["Curso", "Turma", "Alunos", "UFs"]], hide_index=True)
 
-    # Alertas
     baixas = plano_editado[plano_editado["Alunos"] < min_alunos]
     if not baixas.empty:
-        st.error(f"Atenção: {len(baixas)} turmas abaixo do mínimo.")
+        st.error("Turmas abaixo do mínimo detectadas.")
         st.dataframe(baixas[["Curso", "Turma", "Alunos"]], hide_index=True)
 
-    # Gráficos e Exportação
     col1, col2 = st.columns(2)
     with col1:
         st.plotly_chart(px.pie(plano_editado, names="Curso", title="Cursos"), use_container_width=True)
