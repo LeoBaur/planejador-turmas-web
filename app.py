@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import math
+import json
 from io import BytesIO
 from supabase import create_client, Client
 
@@ -19,7 +20,6 @@ def tela_login():
         usuario = st.text_input("Usuário")
         senha = st.text_input("Senha", type="password")
         if st.button("Entrar"):
-            # Usuário e senha padrão (você pode alterar aqui)
             if usuario == "admin" and senha == "senac123":
                 st.session_state.autenticado = True
                 st.rerun()
@@ -30,7 +30,7 @@ if not st.session_state.autenticado:
     tela_login()
     st.title("📊 Planejador Inteligente de Turmas")
     st.info("👋 Olá! Por favor, faça login na barra lateral para acessar o sistema.")
-    st.stop() # Bloqueia o restante do código até fazer login
+    st.stop()
 
 # =========================
 # CONEXÃO SUPABASE
@@ -52,17 +52,10 @@ supabase = init_connection()
 st.sidebar.header("⚙️ Parâmetros")
 
 min_alunos = st.sidebar.number_input(
-    "Mínimo de alunos por turma",
-    min_value=1,
-    max_value=100,
-    value=30
+    "Mínimo de alunos por turma", min_value=1, max_value=100, value=30
 )
-
 max_alunos = st.sidebar.number_input(
-    "Máximo de alunos por turma",
-    min_value=1,
-    max_value=100,
-    value=45
+    "Máximo de alunos por turma", min_value=1, max_value=100, value=45
 )
 
 if st.sidebar.button("Sair (Logout)"):
@@ -87,8 +80,7 @@ def gerar_turmas(df, min_alunos, max_alunos):
             }] * int(row["Qtde"]))
 
         total = len(lista)
-        if total == 0:
-            continue
+        if total == 0: continue
 
         turmas_necessarias = math.ceil(total / max_alunos)
 
@@ -124,30 +116,32 @@ arquivo = st.file_uploader("📤 Envie sua planilha", type=["xlsx"])
 if arquivo:
     df_raw = pd.read_excel(arquivo)
 
-    # Limpeza básica
-    df_raw.columns = df_raw.columns.str.strip()
+    # 1. NORMALIZAÇÃO A FORÇA DAS COLUNAS (Ignora espaços e caixa alta/baixa)
+    df_raw.columns = [str(c).strip().title() for c in df_raw.columns]
+    df_raw = df_raw.rename(columns={"Uf": "UF", "Cnpj": "CNPJ"}) # Ajusta as siglas
     
     colunas_obrigatorias = ["Curso", "UF", "CNPJ", "Qtde"]
     
     if not all(col in df_raw.columns for col in colunas_obrigatorias):
         st.error(f"Erro: A planilha deve conter as colunas: {', '.join(colunas_obrigatorias)}")
+        st.write("Colunas encontradas no seu arquivo:", list(df_raw.columns))
     else:
-        # Tratamento de dados
+        # Tratamento de dados garantido
         df_raw["Curso"] = df_raw["Curso"].astype(str).str.strip()
         df_raw["UF"] = df_raw["UF"].astype(str).str.strip()
         df_raw["CNPJ"] = df_raw["CNPJ"].astype(str).str.strip()
         df_raw["Qtde"] = pd.to_numeric(df_raw["Qtde"], errors="coerce").fillna(0).astype(int)
         
-        # Filtra apenas os que têm quantidade
         df_validos = df_raw[df_raw["Qtde"] > 0]
 
         # =========================
-        # NOVO: DASHBOARD DE STATUS
+        # DASHBOARD DE STATUS CORRIGIDO
         # =========================
         if "Status" in df_validos.columns:
             st.subheader("📈 Comparativo de Alunos por Status")
             
-            status_contagem = df_validos["Status"].value_counts().reset_index()
+            # Agora ele SOMA a quantidade de alunos, em vez de contar as linhas!
+            status_contagem = df_validos.groupby("Status")["Qtde"].sum().reset_index()
             status_contagem.columns = ["Status", "Quantidade de Alunos"]
             
             fig_status = px.bar(
@@ -161,22 +155,17 @@ if arquivo:
             st.divider()
 
         # =========================
-        # GERAR TURMAS E AGRUPAR
+        # GERAR TURMAS
         # =========================
-        # Agrupa os dados apenas para o motor de gerar turmas (ignora status aqui para não quebrar a lógica)
         df_agrupado = df_validos.groupby(["Curso", "UF", "CNPJ"], as_index=False)["Qtde"].sum()
-
-        st.subheader("📋 Dados Carregados para Planejamento")
-        st.dataframe(df_agrupado, use_container_width=True)
-
         plano = gerar_turmas(df_agrupado, min_alunos, max_alunos)
 
         if not plano.empty:
             # =========================
-            # NOVO: TABELA EDITÁVEL E SUPABASE
+            # TABELA EDITÁVEL E AUTO-SAVE
             # =========================
-            st.subheader("📚 Ajuste Final das Turmas")
-            st.info("Dê um duplo clique nos nomes das turmas abaixo (coluna 'Turma') para renomear e organizar do seu jeito.")
+            st.subheader("📚 Ajuste de Turmas (Salva Automaticamente)")
+            st.info("Dê um duplo clique nos nomes das turmas (coluna 'Turma') para alterar. O sistema salvará na nuvem sozinho a cada mudança.")
 
             plano_editado = st.data_editor(
                 plano,
@@ -191,20 +180,39 @@ if arquivo:
                 hide_index=True
             )
 
-            if st.button("☁️ Salvar Planejamento na Nuvem (Supabase)"):
+            # Lógica de Salvamento Automático (Verifica se houve alteração desde a última leitura)
+            dados_atuais = plano_editado.to_dict(orient="records")
+            hash_atual = hash(json.dumps(dados_atuais, sort_keys=True))
+
+            if st.session_state.get("ultimo_hash_salvo") != hash_atual:
                 if supabase:
                     try:
-                        # Converte a tabela editada para formato JSON (dicionário)
-                        dados_para_salvar = plano_editado.to_dict(orient="records")
+                        # Substitui todos os dados no banco pelos dados novos da tela
+                        supabase.table("planejamentos_turmas").delete().neq("Turma", "limpeza_total").execute()
+                        supabase.table("planejamentos_turmas").insert(dados_atuais).execute()
                         
-                        # Insere no Supabase na tabela "planejamentos_turmas"
-                        resposta = supabase.table("planejamentos_turmas").insert(dados_para_salvar).execute()
-                        st.success("Tudo certo! Planejamento salvo no banco de dados com sucesso.")
+                        st.session_state.ultimo_hash_salvo = hash_atual
+                        st.toast("☁️ Alteração salva na nuvem com sucesso!", icon="✅")
                     except Exception as e:
-                        st.error(f"Erro ao salvar no banco. Verifique se a tabela 'planejamentos_turmas' existe no Supabase. Detalhes: {e}")
-                else:
-                    st.warning("⚠️ Conexão com Supabase não encontrada. Configure as chaves nos Secrets do Streamlit.")
+                        st.error(f"Erro no auto-save. Verifique se a tabela foi criada no Supabase. Detalhes: {e}")
 
+            # =========================
+            # NOVO: BUSCADOR DE CNPJ
+            # =========================
+            st.divider()
+            st.subheader("🔍 Localizador de Empresa")
+            busca_cnpj = st.text_input("Digite um CNPJ para descobrir em qual turma ele foi alocado:")
+            
+            if busca_cnpj:
+                # Filtra a tabela onde a coluna CNPJs contém o texto digitado
+                encontrados = plano_editado[plano_editado["CNPJs"].astype(str).str.contains(busca_cnpj, case=False, na=False)]
+                
+                if not encontrados.empty:
+                    st.success(f"CNPJ localizado em {len(encontrados)} turma(s):")
+                    st.dataframe(encontrados[["Curso", "Turma", "Alunos", "UF"]], hide_index=True, use_container_width=True)
+                else:
+                    st.warning("CNPJ não localizado no planejamento atual.")
+            
             st.divider()
 
             # =========================
@@ -216,11 +224,9 @@ if arquivo:
             with col1:
                 fig = px.bar(resumo, x="Curso", y="Turmas", title="Turmas por curso")
                 st.plotly_chart(fig, use_container_width=True)
-
             with col2:
                 fig2 = px.pie(plano_editado, names="Curso", title="Distribuição das turmas")
                 st.plotly_chart(fig2, use_container_width=True)
-
             with col3:
                 fig3 = px.histogram(plano_editado, x="Alunos", nbins=10, title="Alunos por turma")
                 st.plotly_chart(fig3, use_container_width=True)
