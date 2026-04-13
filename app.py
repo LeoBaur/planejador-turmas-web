@@ -6,11 +6,11 @@ import json
 from io import BytesIO
 from supabase import create_client, Client
 
-# Configuração inicial
+# Configuração da Página
 st.set_page_config(page_title="Planejador Inteligente de Turmas", layout="wide")
 
 # =========================
-# FUNÇÕES DE AUXÍLIO (DOWNLOADS)
+# FUNÇÕES DE APOIO (DOWNLOADS)
 # =========================
 def gerar_modelo_excel():
     modelo_df = pd.DataFrame({
@@ -61,7 +61,7 @@ with st.sidebar:
         st.download_button(
             label="📥 Baixar Modelo de Planilha",
             data=gerar_modelo_excel(),
-            file_name="modelo_senac_turmas.xlsx",
+            file_name="modelo_planejamento.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
@@ -80,13 +80,12 @@ def init_connection():
         key = st.secrets["SUPABASE_KEY"]
         return create_client(url, key)
     except Exception as e:
-        st.sidebar.error(f"Erro de conexão: {e}")
         return None
 
 supabase = init_connection()
 
 # =========================
-# PARÂMETROS DE CÁLCULO
+# PARÂMETROS
 # =========================
 st.sidebar.header("⚙️ Parâmetros")
 min_alunos = st.sidebar.number_input("Mínimo por turma", min_value=1, value=30)
@@ -95,7 +94,7 @@ max_alunos = st.sidebar.number_input("Máximo por turma", min_value=1, value=45)
 st.title("📊 Planejador Inteligente de Turmas")
 
 # =========================
-# MOTOR DE GERAÇÃO DE TURMAS
+# MOTOR DE GERAÇÃO
 # =========================
 def gerar_turmas(df, min_a, max_a):
     turmas_lista = []
@@ -103,7 +102,8 @@ def gerar_turmas(df, min_a, max_a):
         dados_curso = df[df["Curso"] == curso]
         elementos = []
         for _, row in dados_curso.iterrows():
-            elementos.extend([{"UF": row["UF"], "CNPJ": row["CNPJ"]}] * int(row["Qtde"]))
+            # Garantimos que CNPJ e UF são strings para não dar erro no .join posterior
+            elementos.extend([{"UF": str(row["UF"]), "CNPJ": str(row["CNPJ"])}] * int(row["Qtde"]))
         
         total = len(elementos)
         if total == 0: continue
@@ -121,8 +121,8 @@ def gerar_turmas(df, min_a, max_a):
             grupo = elementos[ponteiro:ponteiro+tam]
             ponteiro += tam
             
-            ufs = sorted(set([g["UF"] for g in grupo]))
-            cnpjs = sorted(set([g["CNPJ"] for g in grupo]))
+            ufs = sorted(set([str(g["UF"]) for g in grupo]))
+            cnpjs = sorted(set([str(g["CNPJ"]) for g in grupo]))
             
             turmas_lista.append({
                 "Curso": curso,
@@ -134,84 +134,102 @@ def gerar_turmas(df, min_a, max_a):
     return pd.DataFrame(turmas_lista)
 
 # =========================
-# PROCESSAMENTO DE ARQUIVO
+# CARREGAMENTO DE ARQUIVO
 # =========================
-arquivo = st.file_uploader("📤 Envie sua planilha preenchida", type=["xlsx"])
+arquivo = st.file_uploader("📤 Envie sua planilha", type=["xlsx"])
 
 if arquivo:
     try:
         df_raw = pd.read_excel(arquivo)
-        # Normalização agressiva de colunas
-        df_raw.columns = [str(c).strip().title() for c in df_raw.columns]
-        mapeamento = {"Uf": "UF", "Cnpj": "CNPJ", "Qtde": "Qtde", "Status": "Status"}
-        df_raw = df_raw.rename(columns=mapeamento)
         
-        cols_fixas = ["Curso", "UF", "CNPJ", "Qtde"]
-        if not all(c in df_raw.columns for c in cols_fixas):
-            st.error(f"Faltam colunas obrigatórias. Verifique: {cols_fixas}")
+        # Normalização de Colunas
+        df_raw.columns = [str(c).strip().title() for c in df_raw.columns]
+        df_raw = df_raw.rename(columns={"Uf": "UF", "Cnpj": "CNPJ", "Qtde": "Qtde", "Status": "Status"})
+        
+        cols_obrigatorias = ["Curso", "UF", "CNPJ", "Qtde"]
+        if not all(c in df_raw.columns for c in cols_obrigatorias):
+            st.error(f"A planilha precisa conter: {cols_obrigatorias}")
             st.stop()
 
+        # LIMPEZA CRÍTICA: Forçar Texto e Números corretos
+        df_raw["Curso"] = df_raw["Curso"].astype(str).str.strip()
+        df_raw["UF"] = df_raw["UF"].astype(str).str.strip()
+        df_raw["CNPJ"] = df_raw["CNPJ"].astype(str).str.strip()
         df_raw["Qtde"] = pd.to_numeric(df_raw["Qtde"], errors='coerce').fillna(0).astype(int)
+        
         df_validos = df_raw[df_raw["Qtde"] > 0].copy()
 
         # --- DASHBOARD DE STATUS ---
         if "Status" in df_validos.columns:
             st.subheader("📈 Comparativo por Status (Total de Alunos)")
-            # SOMA a quantidade de alunos por status
             df_status = df_validos.groupby("Status")["Qtde"].sum().reset_index()
-            fig = px.bar(df_status, x="Status", y="Qtde", color="Status", text_auto=True)
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # --- GERAÇÃO DO PLANO ---
+            fig_st = px.bar(df_status, x="Status", y="Qtde", color="Status", text_auto=True, title="Alunos por Fase")
+            st.plotly_chart(fig_st, use_container_width=True)
+            st.divider()
+
+        # --- GERAÇÃO DO PLANEJAMENTO ---
         df_motor = df_validos.groupby(["Curso", "UF", "CNPJ"], as_index=False)["Qtde"].sum()
         plano = gerar_turmas(df_motor, min_alunos, max_alunos)
 
         if not plano.empty:
-            st.divider()
-            st.subheader("📚 Ajuste e Auto-Save")
-            st.caption("As alterações no nome da turma são salvas automaticamente no banco de dados.")
+            st.subheader("📚 Planejamento Gerado")
+            st.caption("Dê um duplo clique na coluna 'Turma' para renomear. O salvamento na nuvem é automático.")
             
-            # Editor de Dados
+            # Editor Interativo
             plano_final = st.data_editor(
                 plano,
                 column_config={"Turma": st.column_config.TextColumn("Nome da Turma (Editável)")},
                 disabled=["Curso", "Alunos", "UFs", "CNPJs"],
                 use_container_width=True,
                 hide_index=True,
-                key="editor_turmas"
+                key="editor_principal"
             )
 
-            # Lógica de Auto-save (Compara o estado atual com o anterior)
+            # --- AUTO-SAVE SUPABASE ---
             if supabase:
                 try:
-                    dados_json = plano_final.to_dict(orient="records")
-                    # No Supabase, deletamos o antigo e inserimos o novo para manter o 'estado atual'
+                    dados_db = plano_final.to_dict(orient="records")
+                    # Limpa e reinsere para garantir sincronia
                     supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
-                    supabase.table("planejamentos_turmas").insert(dados_json).execute()
-                    st.toast("Nuvem atualizada!", icon="☁️")
+                    supabase.table("planejamentos_turmas").insert(dados_db).execute()
+                    st.toast("Dados salvos na nuvem!", icon="☁️")
                 except:
                     pass
 
             # --- BUSCADOR DE CNPJ ---
+            st.divider()
             st.subheader("🔍 Localizador de CNPJ")
-            busca = st.text_input("Digite o CNPJ para localizar a turma:")
+            busca = st.text_input("Pesquisar CNPJ na lista gerada:")
             if busca:
-                # Aqui corrigimos o erro: usamos 'UFs' no plural conforme gerado no motor
+                # Busca na coluna de CNPJs (que é uma string separada por vírgulas)
                 resultado = plano_final[plano_final["CNPJs"].str.contains(busca, na=False)]
                 if not resultado.empty:
-                    st.success(f"Localizado!")
-                    st.dataframe(resultado[["Curso", "Turma", "Alunos", "UFs"]], hide_index=True)
+                    st.success(f"Encontrado!")
+                    # Aqui usamos 'UFs' no plural para evitar o KeyError
+                    st.dataframe(resultado[["Curso", "Turma", "Alunos", "UFs"]], hide_index=True, use_container_width=True)
                 else:
-                    st.warning("CNPJ não encontrado neste planejamento.")
+                    st.warning("CNPJ não localizado neste planejamento.")
 
-            # --- DOWNLOAD FINAL ---
-            resumo = plano_final.groupby("Curso").size().reset_index(name="Turmas")
+            # --- DASHBOARDS DE DISTRIBUIÇÃO ---
+            st.divider()
+            col1, col2 = st.columns(2)
+            resumo_curso = plano_final.groupby("Curso").size().reset_index(name="Total Turmas")
+            
+            with col1:
+                fig1 = px.bar(resumo_curso, x="Curso", y="Total Turmas", title="Turmas por Curso")
+                st.plotly_chart(fig1, use_container_width=True)
+            
+            with col2:
+                fig2 = px.histogram(plano_final, x="Alunos", title="Distribuição de Alunos por Turma")
+                st.plotly_chart(fig2, use_container_width=True)
+
+            # --- BOTÃO DE DOWNLOAD FINAL ---
             st.download_button(
-                label="📥 Baixar Planejamento em Excel",
-                data=gerar_excel_final(plano_final, resumo, df_raw),
-                file_name="planejamento_final_senac.xlsx",
+                label="📥 Baixar Planejamento Final (Excel)",
+                data=gerar_excel_final(plano_final, resumo_curso, df_raw),
+                file_name="planejamento_senac_final.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
     except Exception as e:
-        st.error(f"Erro ao processar: {e}")
+        st.error(f"Erro ao processar a planilha: {e}")
