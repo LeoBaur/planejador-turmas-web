@@ -70,7 +70,7 @@ if not st.session_state.autenticado:
     st.stop()
 
 # =========================
-# CONEXÃO SUPABASE (BLINDADA)
+# CONEXÃO SUPABASE
 # =========================
 @st.cache_resource
 def init_connection():
@@ -78,7 +78,8 @@ def init_connection():
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         return create_client(url, key)
-    except: return None
+    except:
+        return None
 
 supabase = init_connection()
 
@@ -88,7 +89,8 @@ def carregar_do_banco():
             res = supabase.table("planejamentos_turmas").select("*").execute()
             return pd.DataFrame(res.data)
         except Exception as e:
-            st.error("⚠️ Aviso: Falha na conexão com o banco de dados na nuvem. Rodando em modo local.")
+            # Agora a mensagem mostra o motivo exato do bloqueio do Supabase
+            st.warning(f"⚠️ Rodando em modo local. O banco de dados recusou a conexão. Detalhes: {e}")
             return pd.DataFrame()
     return pd.DataFrame()
 
@@ -187,7 +189,7 @@ if arquivo:
             fig_st = px.bar(df_status, x="Status", y="Qtde", color="Status", text_auto=True)
             st.plotly_chart(fig_st, use_container_width=True)
 
-        # GERA AS TURMAS REAIS (AQUI ESTAVA O ERRO DE ONDE SUMIU TUDO!)
+        # Gerar Turmas
         df_motor = df_validos.groupby(["Curso", "UF", "CNPJ"], as_index=False)["Qtde"].sum()
         plano_para_exibir = gerar_turmas(df_motor, min_alunos, max_alunos)
         
@@ -224,8 +226,8 @@ if not plano_para_exibir.empty:
             dados_json = plano_editado.to_dict(orient="records")
             supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
             supabase.table("planejamentos_turmas").insert(dados_json).execute()
-        except:
-            pass 
+        except Exception as e:
+            st.toast(f"Erro de sincronização: {e}", icon="⚠️") 
 
     # 2. Localizador de CNPJ
     st.subheader("🔍 Localizador de CNPJ")
