@@ -89,7 +89,6 @@ def carregar_do_banco():
             res = supabase.table("planejamentos_turmas").select("*").execute()
             return pd.DataFrame(res.data)
         except Exception as e:
-            # Agora a mensagem mostra o motivo exato do bloqueio do Supabase
             st.warning(f"⚠️ Rodando em modo local. O banco de dados recusou a conexão. Detalhes: {e}")
             return pd.DataFrame()
     return pd.DataFrame()
@@ -220,14 +219,26 @@ if not plano_para_exibir.empty:
         key="editor_principal"
     )
 
-    # Lógica do Auto-Save no Supabase
+    # --- AUTO-SAVE SUPABASE (Versão Corrigida Anti-Bug) ---
     if supabase and arquivo is not None:
         try:
-            dados_json = plano_editado.to_dict(orient="records")
+            # Preparamos os dados garantindo que os nomes e tipos batem 100% com o banco
+            dados_db = []
+            for row in plano_editado.to_dict(orient="records"):
+                dados_db.append({
+                    "Curso": str(row["Curso"]),
+                    "Turma": str(row["Turma"]),
+                    "Alunos": int(row["Alunos"]),
+                    "UFs": str(row["UFs"]),
+                    "CNPJs": str(row["CNPJs"])
+                })
+            
+            # Limpa e reinsere
             supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
-            supabase.table("planejamentos_turmas").insert(dados_json).execute()
+            supabase.table("planejamentos_turmas").insert(dados_db).execute()
+            st.toast("Dados sincronizados com a nuvem!", icon="☁️")
         except Exception as e:
-            st.toast(f"Erro de sincronização: {e}", icon="⚠️") 
+            st.error(f"Erro de sincronização: {e}")
 
     # 2. Localizador de CNPJ
     st.subheader("🔍 Localizador de CNPJ")
