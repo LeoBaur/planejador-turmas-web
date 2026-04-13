@@ -220,9 +220,8 @@ if not plano_para_exibir.empty:
     )
 
     # --- AUTO-SAVE SUPABASE (Versão Corrigida Anti-Bug) ---
-    if supabase and arquivo is not None:
+    if supabase and (arquivo is not None or not plano_nuvem.empty):
         try:
-            # Preparamos os dados garantindo que os nomes e tipos batem 100% com o banco
             dados_db = []
             for row in plano_editado.to_dict(orient="records"):
                 dados_db.append({
