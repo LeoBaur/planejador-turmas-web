@@ -501,7 +501,7 @@ if not df_final_trabalho.empty:
                 st.write(f"**{st_nome}:** {count} alunos")
 
     # =========================
-    # TABELA COM EDIÇÃO LIVRE (BARRA DE ROLAGEM RESTAURADA)
+    # TABELA COM EDIÇÃO LIVRE (COLUNAS OCULTAS)
     # =========================
     st.divider()
     st.subheader("📚 Ajuste de Planejamento e Logística Manual")
@@ -512,7 +512,7 @@ if not df_final_trabalho.empty:
     colunas_visiveis = ["Curso", "Turma", "Alunos", "UFs", "CNPJs"]
     colunas_ok = [c for c in colunas_visiveis if c in df_final_trabalho.columns]
     
-   plano_editado = st.data_editor(
+    plano_editado = st.data_editor(
         df_final_trabalho[colunas_ok],
         column_config={
             "Curso": st.column_config.TextColumn("Curso", disabled=True, width="medium"),
@@ -526,6 +526,7 @@ if not df_final_trabalho.empty:
         hide_index=True, 
         key="editor_principal"
     )
+
     if supabase and not plano_editado.empty:
         dict_editado = plano_editado.fillna("").astype(str).to_dict("records")
         current_hash = hash(str(dict_editado))
@@ -651,6 +652,7 @@ if not df_final_trabalho.empty:
                     if uf.strip() and uf.strip() != "nan" and uf.strip() != "Não Informado":
                         relatorio_dados[cnpj]["UFs"].add(uf.strip())
                 
+                # Só adiciona no detalhamento se tiver mais de 0 alunos daquele CNPJ na turma
                 if qtde > 0:
                     relatorio_dados[cnpj]["Turmas Alocadas"].append(f"{turma} ({qtde} vagas)")
                 
