@@ -518,10 +518,11 @@ if not df_final_trabalho.empty:
             "Curso": st.column_config.TextColumn("Curso", disabled=True, width="medium"),
             "Turma": st.column_config.TextColumn("Turma", width="medium"),
             "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium"),
-            "CNPJs": st.column_config.TextColumn("CNPJs", width="large"),
+            # Definimos uma largura fixa em pixels para forçar o scroll horizontal
+            "CNPJs": st.column_config.TextColumn("CNPJs", width=1000), 
             "Alunos": st.column_config.NumberColumn("Alunos")
         },
-        use_container_width=True, # <--- Mude apenas esta linha para True
+        use_container_width=True, # Isso garante o alinhamento com a linha superior
         hide_index=True, 
         key="editor_principal"
     )
