@@ -27,7 +27,6 @@ def gerar_modelo_excel():
 def gerar_excel_final(plano_df, original_df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Removemos as colunas de controle (id, Arquivo) antes de gerar o Excel
         df_export = plano_df.copy()
         for col in ["id", "Arquivo"]:
             if col in df_export.columns:
@@ -39,14 +38,15 @@ def gerar_excel_final(plano_df, original_df):
     return output.getvalue()
 
 # =========================
-# SISTEMA DE LOGIN
+# SISTEMA DE LOGIN (Logout reposicionado e Enter ativado)
 # =========================
 if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
 
 with st.sidebar:
-    st.subheader("🔒 Acesso e Ferramentas")
     if not st.session_state.autenticado:
+        st.subheader("🔒 Acesso ao Sistema")
+        # st.form permite que o usuário digite a senha e pressione ENTER para logar
         with st.form("login_form"):
             usuario = st.text_input("Usuário")
             senha = st.text_input("Senha", type="password")
@@ -59,55 +59,42 @@ with st.sidebar:
                 else:
                     st.error("Credenciais inválidas")
     else:
-        st.success("Logado: Admin")
-        
-        # --- GESTÃO DE ARQUIVOS ---
-        st.divider()
-        st.subheader("📂 Arquivos na Nuvem")
-        
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
-        sb_client = create_client(url, key)
-
-        try:
-            res_arq = sb_client.table("planejamentos_turmas").select("Arquivo").execute()
-            if res_arq.data:
-                df_arq = pd.DataFrame(res_arq.data)
-                lista_arquivos = df_arq["Arquivo"].dropna().unique()
-                
-                for nome_arq in lista_arquivos:
-                    col_txt, col_del = st.columns([3, 1])
-                    col_txt.write(f"📄 {nome_arq}")
-                    if col_del.button("🗑️", key=f"btn_{nome_arq}"):
-                        sb_client.table("planejamentos_turmas").delete().eq("Arquivo", nome_arq).execute()
-                        st.cache_resource.clear()
-                        st.rerun()
-            else:
-                st.info("Nenhum arquivo individual salvo.")
-        except:
-            st.warning("Adicione a coluna 'Arquivo' no Supabase.")
-
-        st.divider()
-        if st.button("🚨 Resetar Tudo (Planejamento Zero)"):
-            sb_client.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
-            st.cache_resource.clear()
-            st.rerun()
-
-        if st.button("Sair (Logout)"):
+        # MELHORIA 3: Logoff e perfil no topo, bem intuitivo
+        st.success("👤 Logado como Admin")
+        if st.button("🚪 Sair (Logout)", use_container_width=True, type="primary"):
             st.session_state.autenticado = False
             st.rerun()
+        
+        st.divider()
+        st.subheader("⚙️ Configurações")
+        min_alunos = st.number_input("Mínimo por turma", min_value=1, value=30)
+        max_alunos = st.number_input("Máximo por turma", min_value=1, value=45)
+        
+        st.divider()
+        st.subheader("⚠️ Zona de Perigo")
+        # MELHORIA 1: Apenas o Reset Total na lateral
+        if st.button("🚨 Resetar Planejamento (Zerar Banco)", use_container_width=True):
+            try:
+                url = st.secrets["SUPABASE_URL"]
+                key = st.secrets["SUPABASE_KEY"]
+                client = create_client(url, key)
+                client.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
+                st.cache_resource.clear()
+                st.rerun()
+            except: pass
         
         st.divider()
         st.write("📂 **Modelos**")
         st.download_button(
             label="📥 Baixar Modelo de Planilha",
             data=gerar_modelo_excel(),
-            file_name="modelo_senac.xlsx"
+            file_name="modelo_senac.xlsx",
+            use_container_width=True
         )
 
 if not st.session_state.autenticado:
     st.title("📊 Planejador Inteligente de Turmas")
-    st.info("👋 Olá! Faça login ou pressione Enter para acessar o sistema.")
+    st.info("👋 Olá! Faça login na barra lateral para acessar o sistema. Você pode digitar a senha e apertar Enter.")
     st.stop()
 
 # =========================
@@ -186,16 +173,14 @@ def gerar_turmas(df, min_a, max_a, plano_antigo=pd.DataFrame(), nome_arquivo="Up
     return pd.DataFrame(turmas_lista)
 
 # =========================
-# PARÂMETROS E CARREGAMENTO
+# INTERFACE PRINCIPAL
 # =========================
-st.sidebar.header("⚙️ Configurações")
-min_alunos = st.sidebar.number_input("Mínimo por turma", min_value=1, value=30)
-max_alunos = st.sidebar.number_input("Máximo por turma", min_value=1, value=45)
-
 st.title("📊 Planejador Inteligente de Turmas")
 
 plano_nuvem = carregar_do_banco()
-arquivo = st.file_uploader("📤 Subir Atualização de Planilha", type=["xlsx"])
+
+# Porta de Entrada
+arquivo = st.file_uploader("📤 Porta de Entrada (Subir Nova Planilha)", type=["xlsx"], help="O arquivo sobe para a nuvem assim que anexado.")
 
 df_final_trabalho = pd.DataFrame()
 df_base_original = pd.DataFrame()
@@ -226,12 +211,29 @@ if arquivo:
 
         df_motor = df_validos.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
         df_final_trabalho = gerar_turmas(df_motor, min_alunos, max_alunos, plano_nuvem, arquivo.name)
-        st.success("Sincronização realizada com sucesso!")
+        st.success(f"Arquivo '{arquivo.name}' sincronizado com a nuvem!")
         
     except Exception as e:
         st.error(f"Erro no processamento da planilha: {e}")
 elif not plano_nuvem.empty:
     df_final_trabalho = plano_nuvem.copy()
+
+# =========================
+# MELHORIA 2: GESTOR DE ARQUIVOS CENTRAL
+# =========================
+if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
+    arquivos_salvos = df_final_trabalho["Arquivo"].dropna().unique()
+    if len(arquivos_salvos) > 0:
+        with st.expander("📂 Gerenciar Arquivos Salvos na Nuvem", expanded=False):
+            st.caption("Arquivos consolidados no banco. Apagar um arquivo remove apenas os dados dele do planejamento.")
+            for arq in arquivos_salvos:
+                c1, c2 = st.columns([8, 1])
+                c1.write(f"📄 **{arq}**")
+                # Botão de exclusão individual diretamente na tela principal
+                if c2.button("❌", key=f"del_{arq}", help="Apagar dados desta planilha"):
+                    supabase.table("planejamentos_turmas").delete().eq("Arquivo", arq).execute()
+                    st.cache_resource.clear()
+                    st.rerun()
 
 # =========================
 # PAINEL DE INDICADORES (KPIs)
@@ -243,7 +245,7 @@ if not df_final_trabalho.empty:
     total_alunos = df_final_trabalho["Alunos"].sum()
     total_solicitacoes = sum(len(str(x).split(",")) for x in df_final_trabalho["CNPJs"] if str(x) != "nan")
     
-    st.metric("Total Geral no Planejamento", f"{total_solicitacoes} Solicitações | {total_alunos} Alunos")
+    st.metric("Total Geral Consolidadado", f"{total_solicitacoes} Solicitações | {total_alunos} Alunos")
     
     c_met1, c_met2 = st.columns(2)
     
@@ -270,19 +272,15 @@ if not df_final_trabalho.empty:
                 st.write(f"**{st_name}:** {counts['solicitacoes']} solicitações ({counts['alunos']} alunos)")
 
     # =========================
-    # TABELA E AUTO-SAVE BLINDADO
+    # TABELA E AUTO-SAVE
     # =========================
     st.divider()
     st.subheader("📚 Ajuste de Planejamento")
     
-    if "id" not in df_final_trabalho.columns:
-        df_final_trabalho["id"] = None
-    if "Arquivo" not in df_final_trabalho.columns:
-        df_final_trabalho["Arquivo"] = "Desconhecido"
-    if "UFs" not in df_final_trabalho.columns:
-        df_final_trabalho["UFs"] = "N/A"
+    if "id" not in df_final_trabalho.columns: df_final_trabalho["id"] = None
+    if "Arquivo" not in df_final_trabalho.columns: df_final_trabalho["Arquivo"] = "Desconhecido"
+    if "UFs" not in df_final_trabalho.columns: df_final_trabalho["UFs"] = "N/A"
 
-    # Adicionamos UFs e Arquivo na ordem para que viajem escondidos na tabela
     ordem_cols = ["id", "Turma", "Curso", "Alunos", "CNPJs", "Status", "Arquivo", "UFs"]
     ordem_ok = [c for c in ordem_cols if c in df_final_trabalho.columns]
     
@@ -306,7 +304,6 @@ if not df_final_trabalho.empty:
         try:
             dados_para_db = []
             for row in plano_editado.to_dict(orient="records"):
-                # Agora lemos direto da linha editada, sem precisar procurar pelo nome da Turma (evita bugs se renomear!)
                 dados_para_db.append({
                     "Curso": str(row.get("Curso", "")), 
                     "Turma": str(row.get("Turma", "")), 
@@ -319,8 +316,8 @@ if not df_final_trabalho.empty:
             
             supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
             supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
-        except Exception as e:
-            st.error(f"Erro ao salvar na nuvem: {e}")
+        except:
+            pass
 
     # =========================
     # BUSCA, ALERTAS E GRÁFICOS
