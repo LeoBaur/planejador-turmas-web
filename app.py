@@ -230,7 +230,6 @@ arquivo = st.file_uploader("📤 Porta de Entrada (Subir Nova Planilha)", type=[
 if arquivo:
     arquivo_ja_existe = False
     if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
-        # Verifica se o arquivo já está contido em alguma string da coluna Arquivo
         if any(arquivo.name in str(val) for val in df_final_trabalho["Arquivo"].values):
             arquivo_ja_existe = True
 
@@ -260,7 +259,6 @@ if arquivo:
                 df_validos = df_raw[df_raw["Qtde"] > 0].copy()
                 df_motor = df_validos.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
 
-                # --- LÓGICA DE PREENCHIMENTO INTELIGENTE (TOP-OFF) ---
                 turmas_estado = df_final_trabalho.to_dict('records') if not df_final_trabalho.empty else []
                 
                 for curso in df_motor["Curso"].unique():
@@ -274,7 +272,6 @@ if arquivo:
                     
                     if not elementos_novos: continue
                     
-                    # 1. Preenche turmas ativas do mesmo curso que têm vagas
                     turmas_curso_existente = [t for t in turmas_estado if t["Curso"] == curso]
                     for turma in turmas_curso_existente:
                         vagas = max_alunos - int(turma["Alunos"])
@@ -297,7 +294,6 @@ if arquivo:
                                 stats_dict[s] = stats_dict.get(s, 0) + 1
                             turma["Status"] = "|".join([f"{k}:{v}" for k, v in stats_dict.items()])
 
-                    # 2. Se sobrar alunos que não couberam, cria turma(s) nova(s)
                     if len(elementos_novos) > 0:
                         total_sobra = len(elementos_novos)
                         n_turmas = math.ceil(total_sobra / max_alunos)
@@ -323,7 +319,6 @@ if arquivo:
                                 stats_counts[s] = stats_counts.get(s, 0) + 1
                             stats_str_coded = "|".join([f"{k}:{v}" for k, v in stats_counts.items()])
                             
-                            # Gera um nome não repetido para a nova turma
                             novo_id = n_existentes + i + 1
                             nome_original = f"{curso[:3].upper()}-{novo_id:02d}"
                             while nome_original in nomes_usados:
@@ -337,10 +332,8 @@ if arquivo:
                                 "Status": stats_str_coded, "Arquivo": arquivo.name
                             })
                 
-                # Salva a reestruturação total no banco
                 if supabase:
                     supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
-                    # Remove o campo ID para o Supabase gerar um novo auto-incremento de forma segura
                     for t in turmas_estado:
                         if "id" in t: del t["id"]
                     supabase.table("planejamentos_turmas").insert(turmas_estado).execute()
@@ -358,7 +351,6 @@ if arquivo:
 # =========================
 if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
     arquivos_salvos = df_final_trabalho["Arquivo"].dropna().unique()
-    # Como os nomes agora podem vir agrupados (ex: "planilha1, planilha2"), separamos a lista visualmente
     lista_arqs_unica = set()
     for aq_str in arquivos_salvos:
         for p in str(aq_str).split(","):
@@ -372,7 +364,6 @@ if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
                 c1.write(f"📄 **{arq}**")
                 if c2.button("❌", key=f"del_{arq}", help=f"Remover dados atrelados a {arq}"):
                     if supabase:
-                        # Deleta qualquer registro que contenha o nome deste arquivo na string
                         supabase.table("planejamentos_turmas").delete().ilike("Arquivo", f"%{arq}%").execute()
                         st.session_state.dados_salvos = carregar_do_banco()
                         if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
@@ -438,10 +429,10 @@ if not df_final_trabalho.empty:
                 st.write(f"**{st_nome}:** {count} alunos")
 
     # =========================
-    # TABELA COM SALVAMENTO ASSÍNCRONO BLINDADO
+    # TABELA COM EDIÇÃO TOTALMENTE LIVRE (MODO DEUS)
     # =========================
     st.divider()
-    st.subheader("📚 Ajuste de Planejamento")
+    st.subheader("📚 Ajuste de Planejamento e Cirurgia Manual")
     
     df_final_trabalho = df_final_trabalho.reset_index(drop=True)
     
@@ -457,9 +448,10 @@ if not df_final_trabalho.empty:
         column_config={
             "id": None, "Status": None, "Arquivo": None, "UFs": None,
             "Turma": st.column_config.TextColumn("Turma (Editável)"),
-            "CNPJs": st.column_config.TextColumn("CNPJs"),
+            "CNPJs": st.column_config.TextColumn("CNPJs (Editável Livre)"),
+            "Alunos": st.column_config.NumberColumn("Alunos (Editável Livre)")
         },
-        disabled=["Curso", "Alunos", "CNPJs"],
+        disabled=["Curso"], # <-- Apenas o curso fica travado agora!
         use_container_width=True, hide_index=True, key="editor_principal"
     )
 
@@ -538,7 +530,7 @@ if not df_final_trabalho.empty:
                                 st.session_state.dados_salvos = carregar_do_banco()
                                 st.rerun()
                     else:
-                        st.error("Nenhuma outra turma deste curso para receber alunos.")
+                        st.error("Nenhuma outra turma deste curso para receber alunos. Ajuste as informações na tabela ao lado manualmente.")
         else:
             st.success("Todas as turmas estão saudáveis e dentro do quórum!")
 
