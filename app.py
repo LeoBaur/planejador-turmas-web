@@ -30,7 +30,7 @@ def gerar_excel_final(plano_df, original_df):
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_export = plano_df.copy()
         
-        # Removemos apenas colunas de sistema invisíveis
+        # Removemos apenas colunas de sistema invisíveis para o Excel exportado
         if "id" in df_export.columns:
             df_export = df_export.drop(columns=["id"])
                 
@@ -54,7 +54,7 @@ def salvar_background(dados_dict, url, key):
         pass
 
 # =========================
-# LÓGICA DE STRINGS E PARSERS (Novo: Leitor de CNPJs)
+# LÓGICA DE STRINGS E PARSERS
 # =========================
 def parse_cnpjs(cnpj_str):
     res = {}
@@ -69,7 +69,6 @@ def parse_cnpjs(cnpj_str):
             q = int(match.group(2))
             res[c] = res.get(c, 0) + q
         else:
-            # Caso o usuário tenha editado manualmente sem parênteses
             res[p] = res.get(p, 0) + 0 
     return res
 
@@ -85,7 +84,7 @@ def merge_strings_list(s1, s2):
     return ", ".join(sorted(set(l1 + l2)))
 
 # =========================
-# LÓGICA DE FUSÃO E DISTRIBUIÇÃO (Com matemática de CNPJ)
+# LÓGICA DE FUSÃO E DISTRIBUIÇÃO
 # =========================
 def fundir_turmas(nome_origem, nome_destino, curso, url, key):
     client = create_client(url, key)
@@ -100,10 +99,8 @@ def fundir_turmas(nome_origem, nome_destino, curso, url, key):
         novas_ufs = merge_strings_list(origem["UFs"], destino["UFs"])
         novos_arqs = merge_strings_list(origem["Arquivo"], destino["Arquivo"])
         
-        # Junta os CNPJs respeitando as quantidades nos parênteses
         novos_cnpjs = merge_cnpjs_str(origem["CNPJs"], destino["CNPJs"])
         
-        # Consolida e limpa status para evitar duplicação
         stats_dict = {}
         for s in [str(origem["Status"]), str(destino["Status"])]:
             for p in s.split("|"):
@@ -161,7 +158,6 @@ def distribuir_turma(nome_origem, curso, url, key):
                 
         dest_cnpjs = parse_cnpjs(dest["CNPJs"])
 
-        # Rateia os status da origem para o destino
         allocated = 0
         for k in list(origem_stats.keys()):
             if allocated == adds[i]: break
@@ -171,7 +167,6 @@ def distribuir_turma(nome_origem, curso, url, key):
                 dest_stats[k] = dest_stats.get(k, 0) + take
                 allocated += take
 
-        # Rateia os CNPJs da origem para o destino
         allocated_cnpjs = 0
         for k in list(origem_cnpjs.keys()):
             if allocated_cnpjs == adds[i]: break
@@ -196,6 +191,8 @@ def distribuir_turma(nome_origem, curso, url, key):
 # =========================
 if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
+if 'turmas_ignoradas' not in st.session_state:
+    st.session_state.turmas_ignoradas = []
 
 with st.sidebar:
     if not st.session_state.autenticado:
@@ -228,6 +225,7 @@ with st.sidebar:
                 client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
                 client.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
                 st.session_state.dados_salvos = pd.DataFrame()
+                st.session_state.turmas_ignoradas = []
                 if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
                 if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
                 st.cache_resource.clear()
@@ -269,7 +267,7 @@ if "dados_salvos" not in st.session_state:
     st.session_state.dados_salvos = carregar_do_banco()
 
 # =========================
-# INTERFACE PRINCIPAL E UPLOAD INTELIGENTE (TOP-OFF)
+# INTERFACE PRINCIPAL E UPLOAD INTELIGENTE
 # =========================
 st.title("📊 Planejador Inteligente de Turmas")
 
@@ -292,7 +290,6 @@ if arquivo:
                 df_raw = pd.read_excel(arquivo)
                 df_base_original = df_raw.copy()
                 
-                # Padronização de Colunas
                 colunas_originais = df_raw.columns.tolist()
                 mapa_renomear = {}
                 for col in colunas_originais:
@@ -312,7 +309,6 @@ if arquivo:
                 df_validos = df_raw[df_raw["Qtde"] > 0].copy()
                 df_motor = df_validos.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
 
-                # --- LÓGICA DE PREENCHIMENTO INTELIGENTE (TOP-OFF) ---
                 turmas_estado = df_final_trabalho.to_dict('records') if not df_final_trabalho.empty else []
                 
                 for curso in df_motor["Curso"].unique():
@@ -327,7 +323,6 @@ if arquivo:
                     
                     if not elementos_novos: continue
                     
-                    # 1. Preenche turmas ativas do mesmo curso que têm vagas
                     turmas_curso_existente = [t for t in turmas_estado if t["Curso"] == curso]
                     for turma in turmas_curso_existente:
                         vagas = max_alunos - int(turma["Alunos"])
@@ -339,7 +334,6 @@ if arquivo:
                             turma["UFs"] = merge_strings_list(turma["UFs"], ", ".join([g["UF"] for g in alocados]))
                             turma["Arquivo"] = merge_strings_list(turma["Arquivo"], arquivo.name)
                             
-                            # Calcula e insere CNPJs formatados
                             cnpjs_atuais_dict = parse_cnpjs(turma["CNPJs"])
                             for g in alocados:
                                 c = str(g["CNPJ"])
@@ -356,7 +350,6 @@ if arquivo:
                                 stats_dict[s] = stats_dict.get(s, 0) + 1
                             turma["Status"] = "|".join([f"{k}:{v}" for k, v in stats_dict.items()])
 
-                    # 2. Se sobrar alunos que não couberam, cria turma(s) nova(s)
                     if len(elementos_novos) > 0:
                         total_sobra = len(elementos_novos)
                         n_turmas = math.ceil(total_sobra / max_alunos)
@@ -401,7 +394,6 @@ if arquivo:
                                 "Status": stats_str_coded, "Arquivo": arquivo.name
                             })
                 
-                # Salva a reestruturação total no banco
                 if supabase:
                     supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
                     for t in turmas_estado:
@@ -410,6 +402,7 @@ if arquivo:
                     
                 st.success(f"Arquivo '{arquivo.name}' preenchido e distribuído com sucesso!")
                 st.session_state.dados_salvos = carregar_do_banco()
+                st.session_state.turmas_ignoradas = [] # Reseta os alertas ignorados ao processar novo arquivo
                 if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
                 if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
                 st.rerun()
@@ -437,12 +430,13 @@ if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
                     if supabase:
                         supabase.table("planejamentos_turmas").delete().ilike("Arquivo", f"%{arq}%").execute()
                         st.session_state.dados_salvos = carregar_do_banco()
+                        st.session_state.turmas_ignoradas = []
                         if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
                         if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
                         st.rerun()
 
 # =========================
-# PAINEL DE INDICADORES (KPIs ORIGINAIS)
+# PAINEL DE INDICADORES (KPIs ATUALIZADOS)
 # =========================
 if not df_final_trabalho.empty:
     st.divider()
@@ -454,10 +448,15 @@ if not df_final_trabalho.empty:
     c_met1, c_met2 = st.columns(2)
     
     with c_met1:
-        with st.expander("🎓 Alunos por Tipo de Curso", expanded=True):
-            resumo_curso = df_final_trabalho.groupby("Curso")["Alunos"].sum().reset_index()
+        with st.expander("🎓 Resumo por Curso (Turmas e Alunos)", expanded=True):
+            resumo_curso = df_final_trabalho.groupby("Curso").agg(Alunos=('Alunos', 'sum'), Turmas=('Turma', 'count')).reset_index()
+            total_turmas = resumo_curso['Turmas'].sum()
+            
+            st.write(f"**📊 Total Geral:** {total_turmas} turmas abertas")
+            st.divider()
+            
             for _, r in resumo_curso.iterrows():
-                st.write(f"**{r['Curso']}:** {r['Alunos']} alunos")
+                st.write(f"**{r['Curso']}:** {r['Turmas']} turmas | {r['Alunos']} alunos")
 
     with c_met2:
         with st.expander("📋 Alunos por Tipo de Solicitação", expanded=True):
@@ -502,7 +501,7 @@ if not df_final_trabalho.empty:
                 st.write(f"**{st_nome}:** {count} alunos")
 
     # =========================
-    # TABELA COM EDIÇÃO LIVRE (UFS INCLUÍDA E BARRA DE ROLAGEM)
+    # TABELA COM EDIÇÃO LIVRE (COLUNAS OCULTAS E BARRA DE ROLAGEM)
     # =========================
     st.divider()
     st.subheader("📚 Ajuste de Planejamento e Logística Manual")
@@ -513,7 +512,6 @@ if not df_final_trabalho.empty:
     if "Arquivo" not in df_final_trabalho.columns: df_final_trabalho["Arquivo"] = "Desconhecido"
     if "UFs" not in df_final_trabalho.columns: df_final_trabalho["UFs"] = "Não Informado"
 
-    # UFs agora faz parte da ordem visível
     ordem_cols = ["id", "Turma", "Curso", "Alunos", "UFs", "CNPJs", "Status", "Arquivo"]
     ordem_ok = [c for c in ordem_cols if c in df_final_trabalho.columns]
     
@@ -521,20 +519,19 @@ if not df_final_trabalho.empty:
         df_final_trabalho[ordem_ok],
         column_config={
             "id": None, 
-            "Status": st.column_config.TextColumn("Status", width="large"), 
-            "Arquivo": st.column_config.TextColumn("Arquivo", width="medium"),
+            "Status": None,   # OCULTADO DA VISÃO
+            "Arquivo": None,  # OCULTADO DA VISÃO
             "Turma": st.column_config.TextColumn("Turma", width="medium"),
             "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium"),
             "CNPJs": st.column_config.TextColumn("CNPJs", width="large"),
             "Alunos": st.column_config.NumberColumn("Alunos")
         },
-        disabled=["Curso"], # Apenas o Curso bloqueado. Turma, UF, CNPJ e Alunos livres para edição.
-        use_container_width=False, # <-- ISTO LIGA A BARRA DE ROLAGEM HORIZONTAL
+        disabled=["Curso"], 
+        use_container_width=False, 
         hide_index=True, 
         key="editor_principal"
     )
 
-    # Salvamento Assíncrono de Alta Performance
     if supabase and not plano_editado.empty:
         dict_editado = plano_editado.fillna("").astype(str).to_dict("records")
         current_hash = hash(str(dict_editado))
@@ -560,7 +557,7 @@ if not df_final_trabalho.empty:
             threading.Thread(target=salvar_background, args=(dados_para_db, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])).start()
 
     # =========================
-    # ASSISTENTE DE REMANEJAMENTO
+    # ASSISTENTE DE REMANEJAMENTO E EXCEÇÕES
     # =========================
     st.divider()
     col_l, col_r = st.columns([1, 1])
@@ -578,7 +575,11 @@ if not df_final_trabalho.empty:
 
     with col_r:
         st.subheader("🔄 Assistente de Remanejamento")
-        baixas = plano_editado[plano_editado["Alunos"] < min_alunos]
+        
+        # Filtra turmas abaixo do mínimo, exceto as que o usuário mandou ignorar
+        baixas_total = plano_editado[plano_editado["Alunos"] < min_alunos]
+        baixas = baixas_total[~baixas_total["Turma"].isin(st.session_state.turmas_ignoradas)]
+        ignoradas = baixas_total[baixas_total["Turma"].isin(st.session_state.turmas_ignoradas)]
         
         if not baixas.empty:
             st.warning(f"⚠️ **{len(baixas)} turma(s) cancelada(s) ou abaixo do quórum de {min_alunos}.**")
@@ -591,32 +592,48 @@ if not df_final_trabalho.empty:
                 candidatas = plano_editado[(plano_editado["Curso"] == curso_b) & (plano_editado["Turma"] != nome_b)]
                 
                 with st.expander(f"⚙️ Resolver: {nome_b} ({alunos_b} alunos)", expanded=False):
-                    if not candidatas.empty:
-                        opcao_acao = st.radio("Estratégia de Remanejamento:", 
-                                              ["1. Fundir com uma turma específica", "2. Distribuir igualitariamente entre as outras"], 
-                                              key=f"rad_{nome_b}")
+                    
+                    opcoes_estrategia = ["1. Fundir com uma turma específica", "2. Distribuir igualitariamente entre as outras", "3. Ignorar e Manter Turma"]
+                    
+                    if candidatas.empty:
+                        st.error("Nenhuma outra turma deste curso para receber alunos. Sua única opção é ignorar ou editar manualmente na tabela.")
+                        opcoes_estrategia = ["3. Ignorar e Manter Turma"]
+                    
+                    opcao_acao = st.radio("Estratégia de Remanejamento:", opcoes_estrategia, key=f"rad_{nome_b}")
+                    
+                    if opcao_acao.startswith("1"):
+                        opcoes = [f"{cand['Turma']} (Ficará com {int(cand['Alunos']) + alunos_b} alunos)" for _, cand in candidatas.iterrows()]
+                        destino_sel = st.selectbox("Escolha a turma de destino:", opcoes, key=f"sel_{nome_b}")
                         
-                        if opcao_acao.startswith("1"):
-                            opcoes = [f"{cand['Turma']} (Ficará com {int(cand['Alunos']) + alunos_b} alunos)" for _, cand in candidatas.iterrows()]
-                            destino_sel = st.selectbox("Escolha a turma de destino:", opcoes, key=f"sel_{nome_b}")
+                        if st.button("Aplicar Fusão Direta", key=f"btn_fusao_{nome_b}", type="primary"):
+                            nome_destino = destino_sel.split(" (")[0]
+                            fundir_turmas(nome_b, nome_destino, curso_b, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+                            st.session_state.dados_salvos = carregar_do_banco()
+                            st.rerun()
                             
-                            if st.button("Aplicar Fusão Direta", key=f"btn_fusao_{nome_b}", type="primary"):
-                                nome_destino = destino_sel.split(" (")[0]
-                                fundir_turmas(nome_b, nome_destino, curso_b, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-                                st.session_state.dados_salvos = carregar_do_banco()
-                                st.rerun()
-                                
-                        else:
-                            qnt_turmas = len(candidatas)
-                            st.info(f"Os {alunos_b} alunos serão divididos entre as {qnt_turmas} outras turmas ativas de {curso_b}.")
-                            if st.button("Aplicar Distribuição em Lote", key=f"btn_dist_{nome_b}", type="primary"):
-                                distribuir_turma(nome_b, curso_b, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-                                st.session_state.dados_salvos = carregar_do_banco()
-                                st.rerun()
-                    else:
-                        st.error("Nenhuma outra turma deste curso para receber alunos. Ajuste as informações na tabela ao lado manualmente.")
+                    elif opcao_acao.startswith("2"):
+                        qnt_turmas = len(candidatas)
+                        st.info(f"Os {alunos_b} alunos serão divididos entre as {qnt_turmas} outras turmas ativas de {curso_b}.")
+                        if st.button("Aplicar Distribuição em Lote", key=f"btn_dist_{nome_b}", type="primary"):
+                            distribuir_turma(nome_b, curso_b, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+                            st.session_state.dados_salvos = carregar_do_banco()
+                            st.rerun()
+                            
+                    elif opcao_acao.startswith("3"):
+                        st.info("A turma será mantida com a quantidade atual de alunos e este alerta será ocultado do assistente.")
+                        if st.button("Confirmar (Ocultar Alerta)", key=f"btn_ignorar_{nome_b}"):
+                            st.session_state.turmas_ignoradas.append(nome_b)
+                            st.rerun()
         else:
-            st.success("Todas as turmas estão saudáveis e dentro do quórum!")
+            st.success("Todas as turmas analisadas estão saudáveis ou foram aprovadas por você!")
+
+        # Botão para limpar a lista de ignorados caso o usuário mude de ideia
+        if not ignoradas.empty:
+            st.divider()
+            st.caption(f"👁️ Você tem {len(ignoradas)} alerta(s) de turma(s) abaixo do mínimo sendo ignorado(s).")
+            if st.button("Restaurar Alertas Ignorados"):
+                st.session_state.turmas_ignoradas = []
+                st.rerun()
 
     st.divider()
     st.download_button("📥 Baixar Excel Completo", data=gerar_excel_final(plano_editado, df_base_original), file_name="planejamento_senac.xlsx")
