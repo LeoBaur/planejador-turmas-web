@@ -37,7 +37,7 @@ def gerar_excel_final(plano_df, original_df):
             original_df.to_excel(writer, sheet_name="Base_Original", index=False)
     return output.getvalue()
 
-# NOVO: Função que roda em segundo plano para não travar a digitação
+# Salvamento Assíncrono (Sem travar a tela)
 def salvar_background(dados_dict, url, key):
     try:
         client = create_client(url, key)
@@ -45,6 +45,49 @@ def salvar_background(dados_dict, url, key):
         client.table("planejamentos_turmas").insert(dados_dict).execute()
     except Exception:
         pass
+
+# =========================
+# LÓGICA DE FUSÃO / REMANEJAMENTO
+# =========================
+def fundir_turmas(nome_origem, nome_destino, curso, url, key):
+    client = create_client(url, key)
+    res = client.table("planejamentos_turmas").select("*").eq("Curso", curso).in_("Turma", [nome_origem, nome_destino]).execute()
+    df_db = pd.DataFrame(res.data)
+    
+    if len(df_db) == 2:
+        origem = df_db[df_db["Turma"] == nome_origem].iloc[0]
+        destino = df_db[df_db["Turma"] == nome_destino].iloc[0]
+        
+        novos_alunos = int(destino["Alunos"]) + int(origem["Alunos"])
+        
+        # Junta e limpa CNPJs repetidos
+        cnpjs_o = [c.strip() for c in str(origem["CNPJs"]).split(",") if c.strip() and c.strip() != "nan"]
+        cnpjs_d = [c.strip() for c in str(destino["CNPJs"]).split(",") if c.strip() and c.strip() != "nan"]
+        novos_cnpjs = ", ".join(sorted(set(cnpjs_o + cnpjs_d)))
+        
+        # Junta UFs repetidas
+        ufs_o = [u.strip() for u in str(origem["UFs"]).split(",") if u.strip() and u.strip() != "nan"]
+        ufs_d = [u.strip() for u in str(destino["UFs"]).split(",") if u.strip() and u.strip() != "nan"]
+        novas_ufs = ", ".join(sorted(set(ufs_o + ufs_d)))
+        
+        # Junta Arquivos
+        arq_o = [a.strip() for a in str(origem["Arquivo"]).split(",") if a.strip() and a.strip() != "nan"]
+        arq_d = [a.strip() for a in str(destino["Arquivo"]).split(",") if a.strip() and a.strip() != "nan"]
+        novos_arquivos = ", ".join(sorted(set(arq_o + arq_d)))
+        
+        # Concatena o Status para o KPI fazer a matemática correta
+        novo_status = f"{destino['Status']}|{origem['Status']}"
+        
+        # Atualiza a Destino e Deleta a Origem
+        client.table("planejamentos_turmas").update({
+            "Alunos": novos_alunos,
+            "CNPJs": novos_cnpjs,
+            "UFs": novas_ufs,
+            "Arquivo": novos_arquivos,
+            "Status": novo_status
+        }).eq("id", destino["id"]).execute()
+        
+        client.table("planejamentos_turmas").delete().eq("id", origem["id"]).execute()
 
 # =========================
 # SISTEMA DE LOGIN E LIMPEZA
@@ -86,7 +129,6 @@ with st.sidebar:
                 client = create_client(url, key)
                 client.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
                 
-                # Limpa todos os caches para evitar dados fantasmas
                 st.session_state.dados_salvos = pd.DataFrame()
                 if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
                 if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
@@ -130,7 +172,6 @@ def carregar_do_banco():
             return pd.DataFrame()
     return pd.DataFrame()
 
-# Mantém a tabela base intocável durante a digitação
 if "dados_salvos" not in st.session_state:
     st.session_state.dados_salvos = carregar_do_banco()
 
@@ -243,6 +284,7 @@ if arquivo:
             df_novo_arquivo = gerar_turmas(df_motor, min_alunos, max_alunos, df_final_trabalho, arquivo.name)
             
             if supabase:
+                # O banco aceita dados novos sem apagar os outros arquivos!
                 supabase.table("planejamentos_turmas").delete().eq("Arquivo", arquivo.name).execute()
                 dados_para_db = []
                 for _, row in df_novo_arquivo.iterrows():
@@ -254,8 +296,6 @@ if arquivo:
                 supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
                 
             st.success(f"Arquivo '{arquivo.name}' adicionado ao planejamento!")
-            
-            # Reseta estado limpo pós upload
             st.session_state.dados_salvos = carregar_do_banco()
             if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
             if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
@@ -328,7 +368,6 @@ if not df_final_trabalho.empty:
                             adjusted_qtd = round((s_qtd / soma_interna) * total_alunos_row)
                             distribuido += adjusted_qtd
                         status_totals[s_nome] = status_totals.get(s_nome, 0) + adjusted_qtd
-                        
                 elif "," in st_val:
                     partes = [p.strip() for p in st_val.split(",") if p.strip()]
                     if not partes: partes = ["Não Informado"]
@@ -374,7 +413,6 @@ if not df_final_trabalho.empty:
         key="editor_principal"
     )
 
-    # Detecção e Envio Assíncrono para o Banco
     if supabase and not plano_editado.empty:
         dict_editado = plano_editado.fillna("").astype(str).to_dict("records")
         current_hash = hash(str(dict_editado))
@@ -399,15 +437,16 @@ if not df_final_trabalho.empty:
                     "Arquivo": str(original["Arquivo"])
                 })
             
-            # Dispara uma tarefa invisível para salvar, sem travar o seu cursor
             url = st.secrets["SUPABASE_URL"]
             sb_key = st.secrets["SUPABASE_KEY"]
             threading.Thread(target=salvar_background, args=(dados_para_db, url, sb_key)).start()
 
     # =========================
-    # BUSCA E ALERTAS (Visual Limpo)
+    # ASSISTENTE DE REMANEJAMENTO E BUSCA
     # =========================
-    col_l, col_r = st.columns(2)
+    st.divider()
+    col_l, col_r = st.columns([1, 1])
+    
     with col_l:
         st.subheader("🔍 Localizador de CNPJ")
         busca = st.text_input("Digite o CNPJ para localizar a turma:")
@@ -420,13 +459,43 @@ if not df_final_trabalho.empty:
                 st.warning("CNPJ não encontrado.")
 
     with col_r:
-        st.subheader("⚠️ Alertas de Ocupação")
+        st.subheader("🔄 Assistente de Fusão / Remanejamento")
         baixas = plano_editado[plano_editado["Alunos"] < min_alunos]
+        
         if not baixas.empty:
-            st.error(f"{len(baixas)} turmas abaixo do quórum.")
-            st.dataframe(baixas[["Curso", "Turma", "Alunos"]], hide_index=True)
+            st.warning(f"⚠️ **{len(baixas)} turma(s) cancelada(s) ou abaixo do quórum de {min_alunos}.**")
+            
+            for idx, turma_baixa in baixas.iterrows():
+                curso_b = turma_baixa["Curso"]
+                nome_b = turma_baixa["Turma"]
+                alunos_b = int(turma_baixa["Alunos"])
+                
+                candidatas = plano_editado[(plano_editado["Curso"] == curso_b) & (plano_editado["Turma"] != nome_b)]
+                
+                with st.expander(f"Resolver: {nome_b} ({alunos_b} alunos)", expanded=True):
+                    if not candidatas.empty:
+                        st.write(f"O curso **{curso_b}** possui outras turmas ativas. Sugerimos realocar esses alunos.")
+                        
+                        opcoes = []
+                        for _, cand in candidatas.iterrows():
+                            # Mostra o cenário de como a turma vai ficar
+                            opcoes.append(f"{cand['Turma']} (Ficará com {int(cand['Alunos']) + alunos_b} alunos)")
+                            
+                        destino_sel = st.selectbox("Para qual turma transferir?", opcoes, key=f"sel_{nome_b}")
+                        
+                        if st.button("Confirmar Fusão", key=f"btn_fusao_{nome_b}", type="primary"):
+                            nome_destino = destino_sel.split(" (")[0]
+                            url = st.secrets["SUPABASE_URL"]
+                            sb_key = st.secrets["SUPABASE_KEY"]
+                            fundir_turmas(nome_b, nome_destino, curso_b, url, sb_key)
+                            
+                            # Atualiza cache e recarrega
+                            st.session_state.dados_salvos = carregar_do_banco()
+                            st.rerun()
+                    else:
+                        st.info("Nenhuma outra turma deste mesmo curso disponível para receber alunos.")
         else:
-            st.success("Quórum atingido em todas as turmas.")
+            st.success("Todas as turmas estão saudáveis e dentro do quórum!")
 
     st.divider()
     st.download_button("📥 Baixar Excel Completo", data=gerar_excel_final(plano_editado, df_base_original), file_name="planejamento_senac.xlsx")
