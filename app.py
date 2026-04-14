@@ -46,7 +46,6 @@ if 'autenticado' not in st.session_state:
 with st.sidebar:
     if not st.session_state.autenticado:
         st.subheader("🔒 Acesso ao Sistema")
-        # st.form permite que o usuário digite a senha e pressione ENTER para logar
         with st.form("login_form"):
             usuario = st.text_input("Usuário")
             senha = st.text_input("Senha", type="password")
@@ -59,7 +58,7 @@ with st.sidebar:
                 else:
                     st.error("Credenciais inválidas")
     else:
-        # MELHORIA 3: Logoff e perfil no topo, bem intuitivo
+        # Interface de Logoff intuitiva no topo
         st.success("👤 Logado como Admin")
         if st.button("🚪 Sair (Logout)", use_container_width=True, type="primary"):
             st.session_state.autenticado = False
@@ -72,7 +71,6 @@ with st.sidebar:
         
         st.divider()
         st.subheader("⚠️ Zona de Perigo")
-        # MELHORIA 1: Apenas o Reset Total na lateral
         if st.button("🚨 Resetar Planejamento (Zerar Banco)", use_container_width=True):
             try:
                 url = st.secrets["SUPABASE_URL"]
@@ -94,7 +92,7 @@ with st.sidebar:
 
 if not st.session_state.autenticado:
     st.title("📊 Planejador Inteligente de Turmas")
-    st.info("👋 Olá! Faça login na barra lateral para acessar o sistema. Você pode digitar a senha e apertar Enter.")
+    st.info("👋 Olá! Faça login na barra lateral para acessar o sistema. Suporte a tecla Enter ativado.")
     st.stop()
 
 # =========================
@@ -180,7 +178,7 @@ st.title("📊 Planejador Inteligente de Turmas")
 plano_nuvem = carregar_do_banco()
 
 # Porta de Entrada
-arquivo = st.file_uploader("📤 Porta de Entrada (Subir Nova Planilha)", type=["xlsx"], help="O arquivo sobe para a nuvem assim que anexado.")
+arquivo = st.file_uploader("📤 Porta de Entrada (Subir Nova Planilha)", type=["xlsx"])
 
 df_final_trabalho = pd.DataFrame()
 df_base_original = pd.DataFrame()
@@ -190,17 +188,9 @@ if arquivo:
         df_raw = pd.read_excel(arquivo)
         df_base_original = df_raw.copy()
         
-        colunas_originais = df_raw.columns.tolist()
-        mapa_renomear = {}
-        for col in colunas_originais:
-            c_upper = str(col).strip().upper()
-            if c_upper in ["UF", "ESTADO"]: mapa_renomear[col] = "UF"
-            elif c_upper in ["CNPJ", "CLIENTE"]: mapa_renomear[col] = "CNPJ"
-            elif c_upper in ["QTDE", "QUANTIDADE", "ALUNOS"]: mapa_renomear[col] = "Qtde"
-            elif c_upper in ["STATUS", "SITUAÇÃO", "FASE", "SITUACAO"]: mapa_renomear[col] = "Status"
-            elif c_upper in ["CURSO", "NOME DO CURSO"]: mapa_renomear[col] = "Curso"
-        
-        df_raw = df_raw.rename(columns=mapa_renomear)
+        # Padronização de Colunas
+        df_raw.columns = [str(c).strip().title() for c in df_raw.columns]
+        df_raw = df_raw.rename(columns={"Uf": "UF", "Cnpj": "CNPJ", "Qtde": "Qtde"})
 
         if "Status" not in df_raw.columns:
             df_raw["Status"] = "Não Informado"
@@ -219,33 +209,32 @@ elif not plano_nuvem.empty:
     df_final_trabalho = plano_nuvem.copy()
 
 # =========================
-# MELHORIA 2: GESTOR DE ARQUIVOS CENTRAL
+# GESTOR DE ARQUIVOS CENTRAL (Painel intuitivo para exclusão)
 # =========================
 if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
     arquivos_salvos = df_final_trabalho["Arquivo"].dropna().unique()
     if len(arquivos_salvos) > 0:
-        with st.expander("📂 Gerenciar Arquivos Salvos na Nuvem", expanded=False):
-            st.caption("Arquivos consolidados no banco. Apagar um arquivo remove apenas os dados dele do planejamento.")
+        with st.expander("📂 Gerenciar Arquivos Consolidados no Banco", expanded=False):
+            st.caption("Abaixo estão as planilhas que já estão salvas na nuvem. Excluir aqui removerá os dados do banco definitivamente.")
             for arq in arquivos_salvos:
                 c1, c2 = st.columns([8, 1])
                 c1.write(f"📄 **{arq}**")
-                # Botão de exclusão individual diretamente na tela principal
-                if c2.button("❌", key=f"del_{arq}", help="Apagar dados desta planilha"):
+                if c2.button("❌", key=f"del_{arq}", help=f"Remover dados de {arq}"):
                     supabase.table("planejamentos_turmas").delete().eq("Arquivo", arq).execute()
                     st.cache_resource.clear()
                     st.rerun()
 
 # =========================
-# PAINEL DE INDICADORES (KPIs)
+# PAINEL DE INDICADORES (KPIs REFINADOS)
 # =========================
 if not df_final_trabalho.empty:
     st.divider()
     st.subheader("🏁 Painel de Controle - Visão Geral")
     
     total_alunos = df_final_trabalho["Alunos"].sum()
-    total_solicitacoes = sum(len(str(x).split(",")) for x in df_final_trabalho["CNPJs"] if str(x) != "nan")
     
-    st.metric("Total Geral Consolidadado", f"{total_solicitacoes} Solicitações | {total_alunos} Alunos")
+    # KPI Principal focado apenas em alunos
+    st.metric("Soma Total de Alunos no Planejamento", f"{total_alunos} alunos")
     
     c_met1, c_met2 = st.columns(2)
     
@@ -256,20 +245,11 @@ if not df_final_trabalho.empty:
                 st.write(f"**{r['Curso']}:** {r['Alunos']} alunos")
 
     with c_met2:
-        with st.expander("📋 Por Status da Solicitação", expanded=True):
-            status_counts = {}
-            for _, row in df_final_trabalho.iterrows():
-                st_val = str(row["Status"])
-                q_alunos = int(row["Alunos"])
-                q_solic = len(str(row["CNPJs"]).split(","))
-                
-                if st_val not in status_counts:
-                    status_counts[st_val] = {"alunos": 0, "solicitacoes": 0}
-                status_counts[st_val]["alunos"] += q_alunos
-                status_counts[st_val]["solicitacoes"] += q_solic
-            
-            for st_name, counts in status_counts.items():
-                st.write(f"**{st_name}:** {counts['solicitacoes']} solicitações ({counts['alunos']} alunos)")
+        # MELHORIA 2: Novo nome e lógica focada apenas em alunos
+        with st.expander("📋 Alunos por Tipo de Solicitação", expanded=True):
+            resumo_status = df_final_trabalho.groupby("Status")["Alunos"].sum().reset_index()
+            for _, r in resumo_status.iterrows():
+                st.write(f"**{r['Status']}:** {r['Alunos']} alunos")
 
     # =========================
     # TABELA E AUTO-SAVE
@@ -316,8 +296,7 @@ if not df_final_trabalho.empty:
             
             supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
             supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
-        except:
-            pass
+        except: pass
 
     # =========================
     # BUSCA, ALERTAS E GRÁFICOS
