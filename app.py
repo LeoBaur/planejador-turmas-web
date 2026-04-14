@@ -40,7 +40,6 @@ def gerar_excel_final(plano_df, original_df):
 def higienizar_status(status_str):
     if pd.isna(status_str) or str(status_str).strip() == "":
         return "Não Informado"
-    # Remove espaços extras e padroniza para Título (ex: Em Atendimento)
     return " ".join(str(status_str).split()).title()
 
 def salvar_background(dados_dict, url, key):
@@ -52,7 +51,7 @@ def salvar_background(dados_dict, url, key):
         pass
 
 # =========================
-# LÓGICA DE FUSÃO E DISTRIBUIÇÃO
+# LÓGICA DE FUSÃO, DISTRIBUIÇÃO E PREENCHIMENTO
 # =========================
 def merge_strings_list(s1, s2):
     l1 = [x.strip() for x in str(s1).split(",") if x.strip() and x.strip() != "nan"]
@@ -73,7 +72,6 @@ def fundir_turmas(nome_origem, nome_destino, curso, url, key):
         novas_ufs = merge_strings_list(origem["UFs"], destino["UFs"])
         novos_arqs = merge_strings_list(origem["Arquivo"], destino["Arquivo"])
         
-        # Consolida e limpa status para evitar duplicação na string
         stats_dict = {}
         for s in [str(origem["Status"]), str(destino["Status"])]:
             for p in s.split("|"):
@@ -128,7 +126,6 @@ def distribuir_turma(nome_origem, curso, url, key):
                 k, v = p.split(":")
                 dest_stats[higienizar_status(k)] = int(v)
 
-        # Rateia os status da origem para o destino
         allocated = 0
         for k in list(origem_stats.keys()):
             if allocated == adds[i]: break
@@ -174,7 +171,6 @@ with st.sidebar:
         
         st.divider()
         st.subheader("⚙️ Configurações")
-        # PADRÃO ALTERADO PARA 25
         min_alunos = st.number_input("Mínimo por turma", min_value=1, value=25)
         max_alunos = st.number_input("Máximo por turma", min_value=1, value=45)
         
@@ -222,65 +218,7 @@ if "dados_salvos" not in st.session_state:
     st.session_state.dados_salvos = carregar_do_banco()
 
 # =========================
-# MOTOR DE GERAÇÃO
-# =========================
-def gerar_turmas(df, min_a, max_a, plano_antigo=pd.DataFrame(), nome_arquivo="Upload"):
-    turmas_lista = []
-    mapa_nomes = {}
-    if not plano_antigo.empty:
-        for _, row in plano_antigo.iterrows():
-            cnpjs_vinc = str(row["CNPJs"]).split(", ")
-            for c in cnpjs_vinc:
-                chave = f"{c}_{row['Curso']}"
-                mapa_nomes[chave] = row["Turma"]
-
-    for curso in df["Curso"].unique():
-        dados_curso = df[df["Curso"] == curso]
-        elementos = []
-        for _, row in dados_curso.iterrows():
-            elementos.extend([{
-                "UF": str(row["UF"]), 
-                "CNPJ": str(row["CNPJ"]), 
-                "Status": higienizar_status(row.get("Status", "Não Informado"))
-            }] * int(row["Qtde"]))
-        
-        total = len(elementos)
-        if total == 0: continue
-        
-        n_turmas = math.ceil(total / max_a)
-        while total / n_turmas < min_a and n_turmas > 1: n_turmas -= 1
-            
-        tam_base = total // n_turmas
-        sobra = total % n_turmas
-        ponteiro = 0
-        
-        for i in range(n_turmas):
-            tam = tam_base + (1 if i < sobra else 0)
-            grupo = elementos[ponteiro:ponteiro+tam]
-            ponteiro += tam
-            
-            cnpjs = sorted(set([str(g["CNPJ"]) for g in grupo]))
-            ufs = sorted(set([str(g["UF"]) for g in grupo]))
-            
-            stats_counts = {}
-            for g in grupo:
-                s = g["Status"]
-                stats_counts[s] = stats_counts.get(s, 0) + 1
-            
-            stats_str_coded = "|".join([f"{k}:{v}" for k, v in stats_counts.items()])
-            
-            chave_busca = f"{cnpjs[0]}_{curso}"
-            nome_original = mapa_nomes.get(chave_busca, f"{curso[:3].upper()}-{i+1:02d}")
-            
-            turmas_lista.append({
-                "Curso": curso, "Turma": nome_original, "Alunos": len(grupo),
-                "UFs": ", ".join(ufs), "CNPJs": ", ".join(cnpjs),
-                "Status": stats_str_coded, "Arquivo": nome_arquivo
-            })
-    return pd.DataFrame(turmas_lista)
-
-# =========================
-# INTERFACE PRINCIPAL E UPLOAD ISOLADO
+# INTERFACE PRINCIPAL E UPLOAD INTELIGENTE
 # =========================
 st.title("📊 Planejador Inteligente de Turmas")
 
@@ -289,17 +227,17 @@ df_base_original = pd.DataFrame()
 
 arquivo = st.file_uploader("📤 Porta de Entrada (Subir Nova Planilha)", type=["xlsx"])
 
-# BOTÃO DE PROCESSAMENTO (Resolve o bug do re-upload automático)
 if arquivo:
     arquivo_ja_existe = False
     if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
-        if arquivo.name in df_final_trabalho["Arquivo"].values:
+        # Verifica se o arquivo já está contido em alguma string da coluna Arquivo
+        if any(arquivo.name in str(val) for val in df_final_trabalho["Arquivo"].values):
             arquivo_ja_existe = True
 
     if arquivo_ja_existe:
-        st.info(f"O arquivo '{arquivo.name}' já foi processado e está no banco. Se quiser atualizar, exclua-o abaixo primeiro.")
+        st.info(f"O arquivo '{arquivo.name}' já foi processado e está mesclado no banco.")
     else:
-        if st.button("🚀 Processar e Salvar Planilha", type="primary"):
+        if st.button("🚀 Processar, Preencher Vagas e Salvar", type="primary"):
             try:
                 df_raw = pd.read_excel(arquivo)
                 df_base_original = df_raw.copy()
@@ -315,29 +253,99 @@ if arquivo:
                     elif c_upper in ["CURSO", "NOME DO CURSO"]: mapa_renomear[col] = "Curso"
                 
                 df_raw = df_raw.rename(columns=mapa_renomear)
-
-                if "Status" not in df_raw.columns:
-                    df_raw["Status"] = "Não Informado"
-
+                if "Status" not in df_raw.columns: df_raw["Status"] = "Não Informado"
+                
                 df_raw["CNPJ"] = df_raw["CNPJ"].astype(str).str.strip()
                 df_raw["Qtde"] = pd.to_numeric(df_raw["Qtde"], errors='coerce').fillna(0).astype(int)
                 df_validos = df_raw[df_raw["Qtde"] > 0].copy()
-
                 df_motor = df_validos.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
-                df_novo_arquivo = gerar_turmas(df_motor, min_alunos, max_alunos, df_final_trabalho, arquivo.name)
+
+                # --- LÓGICA DE PREENCHIMENTO INTELIGENTE (TOP-OFF) ---
+                turmas_estado = df_final_trabalho.to_dict('records') if not df_final_trabalho.empty else []
                 
-                if supabase:
-                    supabase.table("planejamentos_turmas").delete().eq("Arquivo", arquivo.name).execute()
-                    dados_para_db = []
-                    for _, row in df_novo_arquivo.iterrows():
-                        dados_para_db.append({
-                            "Curso": str(row["Curso"]), "Turma": str(row["Turma"]), "Alunos": int(row["Alunos"]),
-                            "UFs": str(row["UFs"]), "CNPJs": str(row["CNPJs"]), "Status": str(row["Status"]),
-                            "Arquivo": str(row["Arquivo"])
-                        })
-                    supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
+                for curso in df_motor["Curso"].unique():
+                    dados_curso = df_motor[df_motor["Curso"] == curso]
+                    elementos_novos = []
+                    for _, row in dados_curso.iterrows():
+                        elementos_novos.extend([{
+                            "UF": str(row["UF"]), "CNPJ": str(row["CNPJ"]), 
+                            "Status": higienizar_status(row.get("Status", "Não Informado"))
+                        }] * int(row["Qtde"]))
                     
-                st.success(f"Arquivo '{arquivo.name}' adicionado com sucesso!")
+                    if not elementos_novos: continue
+                    
+                    # 1. Preenche turmas ativas do mesmo curso que têm vagas
+                    turmas_curso_existente = [t for t in turmas_estado if t["Curso"] == curso]
+                    for turma in turmas_curso_existente:
+                        vagas = max_alunos - int(turma["Alunos"])
+                        if vagas > 0 and len(elementos_novos) > 0:
+                            alocados = elementos_novos[:vagas]
+                            elementos_novos = elementos_novos[vagas:]
+                            
+                            turma["Alunos"] += len(alocados)
+                            turma["CNPJs"] = merge_strings_list(turma["CNPJs"], ", ".join([g["CNPJ"] for g in alocados]))
+                            turma["UFs"] = merge_strings_list(turma["UFs"], ", ".join([g["UF"] for g in alocados]))
+                            turma["Arquivo"] = merge_strings_list(turma["Arquivo"], arquivo.name)
+                            
+                            stats_dict = {}
+                            for p in str(turma["Status"]).split("|"):
+                                if ":" in p:
+                                    k, v = p.split(":")
+                                    stats_dict[higienizar_status(k)] = int(v)
+                            for g in alocados:
+                                s = g["Status"]
+                                stats_dict[s] = stats_dict.get(s, 0) + 1
+                            turma["Status"] = "|".join([f"{k}:{v}" for k, v in stats_dict.items()])
+
+                    # 2. Se sobrar alunos que não couberam, cria turma(s) nova(s)
+                    if len(elementos_novos) > 0:
+                        total_sobra = len(elementos_novos)
+                        n_turmas = math.ceil(total_sobra / max_alunos)
+                        while total_sobra / n_turmas < min_alunos and n_turmas > 1: n_turmas -= 1
+                        
+                        tam_base = total_sobra // n_turmas
+                        sobra = total_sobra % n_turmas
+                        ponteiro = 0
+                        n_existentes = len(turmas_curso_existente)
+                        
+                        nomes_usados = [t["Turma"] for t in turmas_estado if t["Curso"] == curso]
+                        
+                        for i in range(n_turmas):
+                            tam = tam_base + (1 if i < sobra else 0)
+                            grupo = elementos_novos[ponteiro:ponteiro+tam]
+                            ponteiro += tam
+                            
+                            cnpjs = sorted(set([str(g["CNPJ"]) for g in grupo]))
+                            ufs = sorted(set([str(g["UF"]) for g in grupo]))
+                            stats_counts = {}
+                            for g in grupo:
+                                s = g["Status"]
+                                stats_counts[s] = stats_counts.get(s, 0) + 1
+                            stats_str_coded = "|".join([f"{k}:{v}" for k, v in stats_counts.items()])
+                            
+                            # Gera um nome não repetido para a nova turma
+                            novo_id = n_existentes + i + 1
+                            nome_original = f"{curso[:3].upper()}-{novo_id:02d}"
+                            while nome_original in nomes_usados:
+                                novo_id += 1
+                                nome_original = f"{curso[:3].upper()}-{novo_id:02d}"
+                            nomes_usados.append(nome_original)
+                            
+                            turmas_estado.append({
+                                "id": None, "Curso": curso, "Turma": nome_original, "Alunos": len(grupo),
+                                "UFs": ", ".join(ufs), "CNPJs": ", ".join(cnpjs),
+                                "Status": stats_str_coded, "Arquivo": arquivo.name
+                            })
+                
+                # Salva a reestruturação total no banco
+                if supabase:
+                    supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
+                    # Remove o campo ID para o Supabase gerar um novo auto-incremento de forma segura
+                    for t in turmas_estado:
+                        if "id" in t: del t["id"]
+                    supabase.table("planejamentos_turmas").insert(turmas_estado).execute()
+                    
+                st.success(f"Arquivo '{arquivo.name}' preenchido e distribuído com sucesso!")
                 st.session_state.dados_salvos = carregar_do_banco()
                 if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
                 if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
@@ -350,22 +358,29 @@ if arquivo:
 # =========================
 if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
     arquivos_salvos = df_final_trabalho["Arquivo"].dropna().unique()
-    if len(arquivos_salvos) > 0:
+    # Como os nomes agora podem vir agrupados (ex: "planilha1, planilha2"), separamos a lista visualmente
+    lista_arqs_unica = set()
+    for aq_str in arquivos_salvos:
+        for p in str(aq_str).split(","):
+            if p.strip() and p.strip() != "nan": lista_arqs_unica.add(p.strip())
+            
+    if len(lista_arqs_unica) > 0:
         with st.expander("📂 Gerenciar Arquivos Consolidados no Banco", expanded=False):
-            st.caption("Planilhas unificadas na nuvem. Excluir uma planilha aqui removerá apenas os dados dela do planejamento total.")
-            for arq in arquivos_salvos:
+            st.caption("Atenção: Turmas mistas serão excluídas integralmente se contiverem o arquivo que você apagar.")
+            for arq in sorted(lista_arqs_unica):
                 c1, c2 = st.columns([8, 1])
                 c1.write(f"📄 **{arq}**")
-                if c2.button("❌", key=f"del_{arq}", help=f"Remover dados de {arq}"):
+                if c2.button("❌", key=f"del_{arq}", help=f"Remover dados atrelados a {arq}"):
                     if supabase:
-                        supabase.table("planejamentos_turmas").delete().eq("Arquivo", arq).execute()
+                        # Deleta qualquer registro que contenha o nome deste arquivo na string
+                        supabase.table("planejamentos_turmas").delete().ilike("Arquivo", f"%{arq}%").execute()
                         st.session_state.dados_salvos = carregar_do_banco()
                         if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
                         if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
                         st.rerun()
 
 # =========================
-# PAINEL DE INDICADORES (KPIs REVISADOS)
+# PAINEL DE INDICADORES (KPIs)
 # =========================
 if not df_final_trabalho.empty:
     st.divider()
@@ -419,7 +434,6 @@ if not df_final_trabalho.empty:
                     st_val = higienizar_status(st_val)
                     status_totals[st_val] = status_totals.get(st_val, 0) + total_alunos_row
             
-            # Ordena e printa os status higienizados e somados perfeitamente
             for st_nome, count in sorted(status_totals.items()):
                 st.write(f"**{st_nome}:** {count} alunos")
 
@@ -500,11 +514,10 @@ if not df_final_trabalho.empty:
                 
                 candidatas = plano_editado[(plano_editado["Curso"] == curso_b) & (plano_editado["Turma"] != nome_b)]
                 
-                with st.expander(f"⚙️ Resolver: {nome_b} ({alunos_b} alunos)", expanded=True):
+                with st.expander(f"⚙️ Resolver: {nome_b} ({alunos_b} alunos)", expanded=False):
                     if not candidatas.empty:
-                        # Nova lógica com dupla escolha
                         opcao_acao = st.radio("Estratégia de Remanejamento:", 
-                                              ["1. Fundir com uma turma específica", "2. Distribuir igualitariamente entre todas as outras turmas"], 
+                                              ["1. Fundir com uma turma específica", "2. Distribuir igualitariamente entre as outras"], 
                                               key=f"rad_{nome_b}")
                         
                         if opcao_acao.startswith("1"):
@@ -525,7 +538,7 @@ if not df_final_trabalho.empty:
                                 st.session_state.dados_salvos = carregar_do_banco()
                                 st.rerun()
                     else:
-                        st.error("Nenhuma outra turma deste curso para receber alunos. Ajuste o mínimo ou exclua a turma manualmente na planilha.")
+                        st.error("Nenhuma outra turma deste curso para receber alunos.")
         else:
             st.success("Todas as turmas estão saudáveis e dentro do quórum!")
 
