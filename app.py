@@ -501,7 +501,7 @@ if not df_final_trabalho.empty:
                 st.write(f"**{st_nome}:** {count} alunos")
 
     # =========================
-    # TABELA COM EDIÇÃO LIVRE (COLUNAS EXTRAS REMOVIDAS DA UI)
+    # TABELA COM EDIÇÃO LIVRE (BARRA DE ROLAGEM RESTAURADA)
     # =========================
     st.divider()
     st.subheader("📚 Ajuste de Planejamento e Logística Manual")
@@ -513,15 +513,15 @@ if not df_final_trabalho.empty:
     colunas_ok = [c for c in colunas_visiveis if c in df_final_trabalho.columns]
     
     plano_editado = st.data_editor(
-        df_final_trabalho[colunas_ok], # <- Cortando as colunas ocultas no servidor
+        df_final_trabalho[colunas_ok],
         column_config={
-            "Curso": st.column_config.TextColumn("Curso", disabled=True),
-            "Turma": st.column_config.TextColumn("Turma"),
-            "UFs": st.column_config.TextColumn("Estados (UFs)"),
-            "CNPJs": st.column_config.TextColumn("CNPJs"),
+            "Curso": st.column_config.TextColumn("Curso", disabled=True, width="medium"),
+            "Turma": st.column_config.TextColumn("Turma", width="medium"),
+            "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium"),
+            "CNPJs": st.column_config.TextColumn("CNPJs", width="large"),
             "Alunos": st.column_config.NumberColumn("Alunos")
         },
-        use_container_width=True, # <- Estica perfeitamente, sem coluna cinza
+        use_container_width=False, # <- ISTO TRAZ A BARRA DE ROLAGEM DE VOLTA
         hide_index=True, 
         key="editor_principal"
     )
@@ -545,8 +545,8 @@ if not df_final_trabalho.empty:
                     "Alunos": int(row.get("Alunos", 0)), 
                     "UFs": str(row.get("UFs", "")), 
                     "CNPJs": str(row.get("CNPJs", "")), 
-                    "Status": str(original.get("Status", "Não Informado")), # Salva o oculto
-                    "Arquivo": str(original.get("Arquivo", "Desconhecido"))  # Salva o oculto
+                    "Status": str(original.get("Status", "Não Informado")), 
+                    "Arquivo": str(original.get("Arquivo", "Desconhecido"))  
                 })
             threading.Thread(target=salvar_background, args=(dados_para_db, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])).start()
 
@@ -627,5 +627,59 @@ if not df_final_trabalho.empty:
                 st.session_state.turmas_ignoradas = []
                 st.rerun()
 
+    # =========================
+    # RELATÓRIO DE CNPJS (PENDÊNCIAS E VAGAS)
+    # =========================
     st.divider()
-    st.download_button("📥 Baixar Excel Completo", data=gerar_excel_final(plano_editado, df_base_original), file_name="planejamento_senac.xlsx")
+    st.subheader("📄 Relatório de CNPJs (Saldos e Pendências)")
+    st.write("Consolidação automática de todos os clientes, mostrando o total de vagas, as UFs de atuação e em quais turmas estão alocados atualmente.")
+    
+    if not plano_editado.empty:
+        relatorio_dados = {}
+        for index, row in plano_editado.iterrows():
+            curso = row.get("Curso", "")
+            turma = row.get("Turma", "")
+            ufs = row.get("UFs", "")
+            cnpjs_parsed = parse_cnpjs(row.get("CNPJs", ""))
+            
+            for cnpj, qtde in cnpjs_parsed.items():
+                if cnpj not in relatorio_dados:
+                    relatorio_dados[cnpj] = {"CNPJ": cnpj, "Vagas Totais": 0, "UFs": set(), "Turmas Alocadas": []}
+                
+                relatorio_dados[cnpj]["Vagas Totais"] += qtde
+                for uf in str(ufs).split(","):
+                    if uf.strip() and uf.strip() != "nan" and uf.strip() != "Não Informado":
+                        relatorio_dados[cnpj]["UFs"].add(uf.strip())
+                
+                if qtde > 0:
+                    relatorio_dados[cnpj]["Turmas Alocadas"].append(f"{turma} ({qtde} vagas)")
+                
+        linhas_df = []
+        for cnpj, dados in relatorio_dados.items():
+            linhas_df.append({
+                "CNPJ": dados["CNPJ"],
+                "UF": ", ".join(sorted(dados["UFs"])) if dados["UFs"] else "Não Informada",
+                "Vagas Totais": dados["Vagas Totais"],
+                "Detalhamento (Turmas)": " | ".join(dados["Turmas Alocadas"])
+            })
+            
+        df_relatorio = pd.DataFrame(linhas_df).sort_values(by="Vagas Totais", ascending=False).reset_index(drop=True)
+        
+        with st.expander("📊 Ver Relatório Consolidado", expanded=False):
+            st.dataframe(df_relatorio, use_container_width=True)
+            
+            def gerar_excel_relatorio(df):
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                    df.to_excel(writer, index=False, sheet_name="Relatório_CNPJs")
+                return output.getvalue()
+                
+            st.download_button(
+                label="📥 Baixar Relatório de CNPJs (Excel)",
+                data=gerar_excel_relatorio(df_relatorio),
+                file_name="relatorio_cnpjs_pendencias.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+    st.divider()
+    st.download_button("📥 Baixar Planilha Principal (Excel Completo)", data=gerar_excel_final(plano_editado, df_base_original), file_name="planejamento_senac.xlsx")
