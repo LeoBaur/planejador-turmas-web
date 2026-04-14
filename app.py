@@ -342,7 +342,35 @@ if not df_final_trabalho.empty:
         else: st.success("Tudo em conformidade!")
 
 # =========================
-    # RELATÓRIO: AGUARDANDO ATENDIMENTO (ESTILO EXPANDER)
+    # TABELA COM EDIÇÃO LIVRE E DOWNLOAD IMEDIATO
+    # =========================
+    st.divider()
+    st.subheader("📚 Ajuste de Planejamento e Logística Manual")
+    
+    df_final_trabalho = df_final_trabalho.reset_index(drop=True)
+    colunas_ok = ["Curso", "Turma", "Alunos", "UFs", "CNPJs"]
+    
+    plano_editado = st.data_editor(
+        df_final_trabalho[colunas_ok],
+        column_config={
+            "Curso": st.column_config.TextColumn("Curso", disabled=True, width="medium"),
+            "Turma": st.column_config.TextColumn("Turma", width="medium"),
+            "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium"),
+            "CNPJs": st.column_config.TextColumn("CNPJs", width=1000), 
+            "Alunos": st.column_config.NumberColumn("Alunos")
+        },
+        use_container_width=True, hide_index=True, key="editor_principal"
+    )
+
+    # Botão de download da planilha principal (conforme solicitado: logo abaixo da planilha)
+    st.download_button("📥 Baixar Planilha Principal (Excel Completo)", 
+                       data=gerar_excel_final(plano_editado, df_base_original), 
+                       file_name="planejamento_senac.xlsx")
+
+    # (Mantenha aqui seu bloco de salvamento background e Assistente de Remanejamento)
+
+    # =========================
+    # RELATÓRIO: AGUARDANDO ATENDIMENTO (ESTILO RESUMO POR CURSO)
     # =========================
     st.divider()
     with st.expander("📄 Relatório de CNPJs (Aguardando atendimento)", expanded=True):
@@ -352,54 +380,39 @@ if not df_final_trabalho.empty:
             status_alvo = "Aguardando Atendimento"
             lista_pendencias = []
 
-            # Percorremos os dados para filtrar apenas o status desejado
             for index, row in df_final_trabalho.iterrows():
-                status_raw = str(row.get("Status", ""))
-                qtd_aguardando_linha = 0
-
-                # Extrai a quantidade exata do status alvo na linha (Formato Status:Qtd)
+                status_raw, qtd_aguardando_linha = str(row.get("Status", "")), 0
                 for p in status_raw.split("|"):
                     if ":" in p:
                         label, valor = p.split(":")
                         if higienizar_status(label) == status_alvo:
                             qtd_aguardando_linha = int(valor)
 
-                # Se houver alguém aguardando atendimento nesta linha
                 if qtd_aguardando_linha > 0:
                     cnpjs_na_linha = parse_cnpjs(row.get("CNPJs", ""))
                     total_alunos_linha = sum(cnpjs_na_linha.values())
-                    
-                    # Proporção: qual % da turma está aguardando?
-                    fator_pendencia = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
-                    
-                    # UF principal da linha
-                    uf_principal = str(row.get("UFs", "Não Informada")).split(",")[0].strip()
+                    fator = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
+                    uf_linha = str(row.get("UFs", "N/A")).split(",")[0].strip()
 
                     for cnpj, qtd_cnpj in cnpjs_na_linha.items():
-                        pendencia_calculada = round(qtd_cnpj * fator_pendencia)
+                        pendencia_calculada = round(qtd_cnpj * fator)
                         if pendencia_calculada > 0:
-                            lista_pendencias.append({
-                                "UF": uf_principal,
-                                "CNPJ": cnpj,
-                                "Qtd Aguardando": pendencia_calculada
-                            })
+                            lista_pendencias.append({"UF": uf_linha, "CNPJ": cnpj, "Qtd": pendencia_calculada})
 
             if lista_pendencias:
-                # Geramos os dois DataFrames para o relatório
-                df_detalhe = pd.DataFrame(lista_pendencias).groupby(["UF", "CNPJ"], as_index=False)["Qtd Aguardando"].sum()
-                df_total_uf = df_detalhe.groupby("UF")["Qtd Aguardando"].sum().reset_index()
-                df_total_uf.columns = ["UF", "Total de Vagas Aguardando"]
+                df_detalhe = pd.DataFrame(lista_pendencias).groupby(["UF", "CNPJ"], as_index=False)["Qtd"].sum()
+                df_total_uf = df_detalhe.groupby("UF")["Qtd"].sum().reset_index()
 
-                # Exibição na Tela (Tabela de totais por UF)
+                # --- NOVO DESIGN: Lista limpa com ícones (Igual ao Resumo por Curso) ---
                 st.write("**Total de Vagas Aguardando Atendimento por UF:**")
-                st.table(df_total_uf)
-
+                for _, row_uf in df_total_uf.iterrows():
+                    st.write(f"📍 **{row_uf['UF']}:** {int(row_uf['Qtd'])} alunos aguardando")
+                
                 st.divider()
                 st.write("**Detalhamento por Cliente (CNPJ):**")
-                st.dataframe(df_detalhe.sort_values(by=["UF", "Qtd Aguardando"], ascending=[True, False]), 
+                st.dataframe(df_detalhe.sort_values(by=["UF", "Qtd"], ascending=[True, False]), 
                              use_container_width=True, hide_index=True)
 
-                # Função interna para gerar Excel com duas abas
                 def gerar_excel_pendencias(df_d, df_t):
                     output = BytesIO()
                     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -407,11 +420,9 @@ if not df_final_trabalho.empty:
                         df_d.to_excel(writer, index=False, sheet_name="Detalhe_por_CNPJ")
                     return output.getvalue()
 
-                st.download_button(
-                    label="📥 Baixar Relatório de Aguardando Atendimento (Excel)",
-                    data=gerar_excel_pendencias(df_detalhe, df_total_uf),
-                    file_name="relatorio_aguardando_atendimento.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                st.download_button(label="📥 Baixar Relatório (Excel)",
+                                   data=gerar_excel_pendencias(df_detalhe, df_total_uf),
+                                   file_name="relatorio_aguardando_atendimento.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             else:
-                st.info("Nenhuma pendência encontrada com o status 'Aguardando Atendimento'.")
+                st.info("Nenhuma pendência encontrada.")
