@@ -521,7 +521,7 @@ if not df_final_trabalho.empty:
             "CNPJs": st.column_config.TextColumn("CNPJs", width="large"),
             "Alunos": st.column_config.NumberColumn("Alunos")
         },
-        use_container_width=False, # <- ISTO TRAZ A BARRA DE ROLAGEM DE VOLTA
+        use_container_width=True, # <--- Mude apenas esta linha para True
         hide_index=True, 
         key="editor_principal"
     )
