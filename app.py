@@ -402,7 +402,7 @@ if arquivo:
                     
                 st.success(f"Arquivo '{arquivo.name}' preenchido e distribuído com sucesso!")
                 st.session_state.dados_salvos = carregar_do_banco()
-                st.session_state.turmas_ignoradas = [] # Reseta os alertas ignorados ao processar novo arquivo
+                st.session_state.turmas_ignoradas = [] 
                 if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
                 if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
                 st.rerun()
@@ -436,7 +436,7 @@ if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
                         st.rerun()
 
 # =========================
-# PAINEL DE INDICADORES (KPIs ATUALIZADOS)
+# PAINEL DE INDICADORES (KPIs)
 # =========================
 if not df_final_trabalho.empty:
     st.divider()
@@ -501,33 +501,27 @@ if not df_final_trabalho.empty:
                 st.write(f"**{st_nome}:** {count} alunos")
 
     # =========================
-    # TABELA COM EDIÇÃO LIVRE (COLUNAS OCULTAS E BARRA DE ROLAGEM)
+    # TABELA COM EDIÇÃO LIVRE (COLUNAS EXTRAS REMOVIDAS DA UI)
     # =========================
     st.divider()
     st.subheader("📚 Ajuste de Planejamento e Logística Manual")
     
     df_final_trabalho = df_final_trabalho.reset_index(drop=True)
     
-    if "id" not in df_final_trabalho.columns: df_final_trabalho["id"] = None
-    if "Arquivo" not in df_final_trabalho.columns: df_final_trabalho["Arquivo"] = "Desconhecido"
-    if "UFs" not in df_final_trabalho.columns: df_final_trabalho["UFs"] = "Não Informado"
-
-    ordem_cols = ["id", "Turma", "Curso", "Alunos", "UFs", "CNPJs", "Status", "Arquivo"]
-    ordem_ok = [c for c in ordem_cols if c in df_final_trabalho.columns]
+    # Define estritamente quais colunas vão para a tela
+    colunas_visiveis = ["Curso", "Turma", "Alunos", "UFs", "CNPJs"]
+    colunas_ok = [c for c in colunas_visiveis if c in df_final_trabalho.columns]
     
     plano_editado = st.data_editor(
-        df_final_trabalho[ordem_ok],
+        df_final_trabalho[colunas_ok], # <- Cortando as colunas ocultas no servidor
         column_config={
-            "id": None, 
-            "Status": None,   # OCULTADO DA VISÃO
-            "Arquivo": None,  # OCULTADO DA VISÃO
-            "Turma": st.column_config.TextColumn("Turma", width="medium"),
-            "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium"),
-            "CNPJs": st.column_config.TextColumn("CNPJs", width="large"),
+            "Curso": st.column_config.TextColumn("Curso", disabled=True),
+            "Turma": st.column_config.TextColumn("Turma"),
+            "UFs": st.column_config.TextColumn("Estados (UFs)"),
+            "CNPJs": st.column_config.TextColumn("CNPJs"),
             "Alunos": st.column_config.NumberColumn("Alunos")
         },
-        disabled=["Curso"], 
-        use_container_width=False, 
+        use_container_width=True, # <- Estica perfeitamente, sem coluna cinza
         hide_index=True, 
         key="editor_principal"
     )
@@ -537,7 +531,7 @@ if not df_final_trabalho.empty:
         current_hash = hash(str(dict_editado))
         
         if "last_saved_hash" not in st.session_state:
-            dict_base = df_final_trabalho[ordem_ok].fillna("").astype(str).to_dict("records")
+            dict_base = df_final_trabalho[colunas_ok].fillna("").astype(str).to_dict("records")
             st.session_state.last_saved_hash = hash(str(dict_base))
             
         if current_hash != st.session_state.last_saved_hash:
@@ -546,13 +540,13 @@ if not df_final_trabalho.empty:
             for index, row in plano_editado.iterrows():
                 original = df_final_trabalho.iloc[index]
                 dados_para_db.append({
-                    "Curso": str(row.get("Curso", "")), 
+                    "Curso": str(row.get("Curso", original.get("Curso", ""))), 
                     "Turma": str(row.get("Turma", "")), 
                     "Alunos": int(row.get("Alunos", 0)), 
                     "UFs": str(row.get("UFs", "")), 
                     "CNPJs": str(row.get("CNPJs", "")), 
-                    "Status": str(original["Status"]),
-                    "Arquivo": str(original["Arquivo"])
+                    "Status": str(original.get("Status", "Não Informado")), # Salva o oculto
+                    "Arquivo": str(original.get("Arquivo", "Desconhecido"))  # Salva o oculto
                 })
             threading.Thread(target=salvar_background, args=(dados_para_db, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])).start()
 
@@ -576,7 +570,6 @@ if not df_final_trabalho.empty:
     with col_r:
         st.subheader("🔄 Assistente de Remanejamento")
         
-        # Filtra turmas abaixo do mínimo, exceto as que o usuário mandou ignorar
         baixas_total = plano_editado[plano_editado["Alunos"] < min_alunos]
         baixas = baixas_total[~baixas_total["Turma"].isin(st.session_state.turmas_ignoradas)]
         ignoradas = baixas_total[baixas_total["Turma"].isin(st.session_state.turmas_ignoradas)]
@@ -627,7 +620,6 @@ if not df_final_trabalho.empty:
         else:
             st.success("Todas as turmas analisadas estão saudáveis ou foram aprovadas por você!")
 
-        # Botão para limpar a lista de ignorados caso o usuário mude de ideia
         if not ignoradas.empty:
             st.divider()
             st.caption(f"👁️ Você tem {len(ignoradas)} alerta(s) de turma(s) abaixo do mínimo sendo ignorado(s).")
