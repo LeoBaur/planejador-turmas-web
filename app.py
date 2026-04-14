@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import math
+import threading
 from io import BytesIO
 from supabase import create_client, Client
 
@@ -8,7 +9,7 @@ from supabase import create_client, Client
 st.set_page_config(page_title="Planejador Inteligente de Turmas", layout="wide")
 
 # =========================
-# FUNÇÕES DE APOIO
+# FUNÇÕES DE APOIO E THREADING
 # =========================
 def gerar_modelo_excel():
     modelo_df = pd.DataFrame({
@@ -36,8 +37,17 @@ def gerar_excel_final(plano_df, original_df):
             original_df.to_excel(writer, sheet_name="Base_Original", index=False)
     return output.getvalue()
 
+# NOVO: Função que roda em segundo plano para não travar a digitação
+def salvar_background(dados_dict, url, key):
+    try:
+        client = create_client(url, key)
+        client.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
+        client.table("planejamentos_turmas").insert(dados_dict).execute()
+    except Exception:
+        pass
+
 # =========================
-# SISTEMA DE LOGIN
+# SISTEMA DE LOGIN E LIMPEZA
 # =========================
 if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
@@ -75,7 +85,11 @@ with st.sidebar:
                 key = st.secrets["SUPABASE_KEY"]
                 client = create_client(url, key)
                 client.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
+                
+                # Limpa todos os caches para evitar dados fantasmas
                 st.session_state.dados_salvos = pd.DataFrame()
+                if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
+                if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
                 st.cache_resource.clear()
                 st.rerun()
             except Exception:
@@ -96,7 +110,7 @@ if not st.session_state.autenticado:
     st.stop()
 
 # =========================
-# CONEXÃO SUPABASE E MEMÓRIA CACHE
+# CONEXÃO SUPABASE E CACHE LOCAL
 # =========================
 @st.cache_resource
 def init_connection():
@@ -116,7 +130,7 @@ def carregar_do_banco():
             return pd.DataFrame()
     return pd.DataFrame()
 
-# NOVO: Cache local para fluidez da tabela
+# Mantém a tabela base intocável durante a digitação
 if "dados_salvos" not in st.session_state:
     st.session_state.dados_salvos = carregar_do_banco()
 
@@ -194,7 +208,6 @@ df_final_trabalho = st.session_state.dados_salvos.copy()
 df_base_original = pd.DataFrame()
 
 if arquivo:
-    # Verificação inteligente para não reprocessar a mesma planilha
     arquivo_ja_existe = False
     if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
         if arquivo.name in df_final_trabalho["Arquivo"].values:
@@ -241,7 +254,11 @@ if arquivo:
                 supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
                 
             st.success(f"Arquivo '{arquivo.name}' adicionado ao planejamento!")
+            
+            # Reseta estado limpo pós upload
             st.session_state.dados_salvos = carregar_do_banco()
+            if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
+            if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
             st.rerun()
             
         except Exception as e:
@@ -262,6 +279,8 @@ if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
                     if supabase:
                         supabase.table("planejamentos_turmas").delete().eq("Arquivo", arq).execute()
                         st.session_state.dados_salvos = carregar_do_banco()
+                        if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
+                        if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
                         st.rerun()
 
 # =========================
@@ -325,7 +344,7 @@ if not df_final_trabalho.empty:
                 st.write(f"**{st_nome}:** {count} alunos")
 
     # =========================
-    # TABELA E AUTO-SAVE BLINDADO (Sem travamentos)
+    # TABELA COM SALVAMENTO ASSÍNCRONO BLINDADO
     # =========================
     st.divider()
     st.subheader("📚 Ajuste de Planejamento")
@@ -355,38 +374,38 @@ if not df_final_trabalho.empty:
         key="editor_principal"
     )
 
-    # LÓGICA DE SALVAMENTO DE ALTA PERFORMANCE
+    # Detecção e Envio Assíncrono para o Banco
     if supabase and not plano_editado.empty:
-        df_comp_old = df_final_trabalho[ordem_ok].fillna("").astype(str).to_dict("records")
-        df_comp_new = plano_editado.fillna("").astype(str).to_dict("records")
+        dict_editado = plano_editado.fillna("").astype(str).to_dict("records")
+        current_hash = hash(str(dict_editado))
         
-        if df_comp_old != df_comp_new:
-            try:
-                dados_para_db = []
-                for index, row in plano_editado.iterrows():
-                    original = df_final_trabalho.iloc[index]
-                    dados_para_db.append({
-                        "Curso": str(row.get("Curso", "")), 
-                        "Turma": str(row.get("Turma", "")), 
-                        "Alunos": int(row.get("Alunos", 0)),
-                        "UFs": str(original["UFs"]), 
-                        "CNPJs": str(row.get("CNPJs", "")), 
-                        "Status": str(original["Status"]),
-                        "Arquivo": str(original["Arquivo"])
-                    })
-                
-                # 1. Atualiza a memória instantaneamente para evitar bugs na digitação
-                st.session_state.dados_salvos = pd.DataFrame(dados_para_db)
-                
-                # 2. Salva silenciosamente no Supabase
-                supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
-                supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
-                
-            except Exception as e:
-                pass
+        if "last_saved_hash" not in st.session_state:
+            dict_base = df_final_trabalho[ordem_ok].fillna("").astype(str).to_dict("records")
+            st.session_state.last_saved_hash = hash(str(dict_base))
+            
+        if current_hash != st.session_state.last_saved_hash:
+            st.session_state.last_saved_hash = current_hash
+            
+            dados_para_db = []
+            for index, row in plano_editado.iterrows():
+                original = df_final_trabalho.iloc[index]
+                dados_para_db.append({
+                    "Curso": str(row.get("Curso", "")), 
+                    "Turma": str(row.get("Turma", "")), 
+                    "Alunos": int(row.get("Alunos", 0)),
+                    "UFs": str(original["UFs"]), 
+                    "CNPJs": str(row.get("CNPJs", "")), 
+                    "Status": str(original["Status"]),
+                    "Arquivo": str(original["Arquivo"])
+                })
+            
+            # Dispara uma tarefa invisível para salvar, sem travar o seu cursor
+            url = st.secrets["SUPABASE_URL"]
+            sb_key = st.secrets["SUPABASE_KEY"]
+            threading.Thread(target=salvar_background, args=(dados_para_db, url, sb_key)).start()
 
     # =========================
-    # BUSCA E ALERTAS (Gráficos Removidos para Limpeza Visual)
+    # BUSCA E ALERTAS (Visual Limpo)
     # =========================
     col_l, col_r = st.columns(2)
     with col_l:
