@@ -342,11 +342,11 @@ if not df_final_trabalho.empty:
         else: st.success("Tudo em conformidade!")
 
   # =========================
-    # RELATÓRIO: AGUARDANDO ATENDIMENTO (ESTILO RESUMO POR CURSO)
+    # RELATÓRIO: AGUARDANDO ATENDIMENTO (RESUMO + DETALHE NO EXCEL)
     # =========================
     st.divider()
     with st.expander("📄 Relatório de CNPJs (Aguardando atendimento)", expanded=True):
-        st.write("Consolidação dos CNPJs e quantidades de alunos com status 'Aguardando Atendimento', detalhados por UF.")
+        st.write("CNPJs e quantidades de alunos com status 'Aguardando Atendimento', detalhados por UF.")
 
         if not df_final_trabalho.empty:
             status_alvo = "Aguardando Atendimento"
@@ -372,29 +372,34 @@ if not df_final_trabalho.empty:
                             lista_pendencias.append({"UF": uf_linha, "CNPJ": cnpj, "Qtd": pendencia_calculada})
 
             if lista_pendencias:
+                # 1. Gerar DataFrames
                 df_detalhe = pd.DataFrame(lista_pendencias).groupby(["UF", "CNPJ"], as_index=False)["Qtd"].sum()
                 df_total_uf = df_detalhe.groupby("UF")["Qtd"].sum().reset_index()
+                df_total_uf.columns = ["UF", "Total Aguardando"]
 
-                # --- NOVO DESIGN: Lista limpa com ícones (Igual ao Resumo por Curso) ---
-                st.write("**Total de Vagas Aguardando Atendimento por UF:**")
+                # 2. Exibição Visual (Estilo Resumo por Curso)
+                st.write("**Total de Vagas por UF:**")
                 for _, row_uf in df_total_uf.iterrows():
-                    st.write(f"📍 **{row_uf['UF']}:** {int(row_uf['Qtd'])} alunos aguardando")
+                    st.write(f"📍 **{row_uf['UF']}:** {int(row_uf['Total Aguardando'])} vagas")
                 
                 st.divider()
-                st.write("**Detalhamento por Cliente (CNPJ):**")
+                st.write("**Detalhamento por Cliente:**")
                 st.dataframe(df_detalhe.sort_values(by=["UF", "Qtd"], ascending=[True, False]), 
                              use_container_width=True, hide_index=True)
 
-                def gerar_excel_pendencias(df_d, df_t):
+                # 3. Função de Download (Gera um Excel com 2 abas)
+                def gerar_excel_pendencias_completo(df_d, df_t):
                     output = BytesIO()
                     with pd.ExcelWriter(output, engine="openpyxl") as writer:
                         df_t.to_excel(writer, index=False, sheet_name="Resumo_por_UF")
                         df_d.to_excel(writer, index=False, sheet_name="Detalhe_por_CNPJ")
                     return output.getvalue()
 
-                st.download_button(label="📥 Baixar Relatório (Excel)",
-                                   data=gerar_excel_pendencias(df_detalhe, df_total_uf),
-                                   file_name="relatorio_aguardando_atendimento.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button(
+                    label="📥 Baixar Relatório Completo (Resumo + Detalhe)",
+                    data=gerar_excel_pendencias_completo(df_detalhe, df_total_uf),
+                    file_name="relatorio_aguardando_atendimento.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
             else:
                 st.info("Nenhuma pendência encontrada.")
