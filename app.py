@@ -58,7 +58,6 @@ with st.sidebar:
                 else:
                     st.error("Credenciais inválidas")
     else:
-        # Interface de Logoff intuitiva no topo
         st.success("👤 Logado como Admin")
         if st.button("🚪 Sair (Logout)", use_container_width=True, type="primary"):
             st.session_state.autenticado = False
@@ -92,7 +91,7 @@ with st.sidebar:
 
 if not st.session_state.autenticado:
     st.title("📊 Planejador Inteligente de Turmas")
-    st.info("👋 Olá! Faça login na barra lateral para acessar o sistema. Suporte a tecla Enter ativado.")
+    st.info("👋 Olá! Faça login na barra lateral para acessar o sistema. Você pode digitar a senha e apertar Enter.")
     st.stop()
 
 # =========================
@@ -115,7 +114,7 @@ def carregar_do_banco():
     return pd.DataFrame()
 
 # =========================
-# MOTOR DE GERAÇÃO
+# MOTOR DE GERAÇÃO (Agora com Matemática Exata de Status)
 # =========================
 def gerar_turmas(df, min_a, max_a, plano_antigo=pd.DataFrame(), nome_arquivo="Upload"):
     turmas_lista = []
@@ -154,7 +153,16 @@ def gerar_turmas(df, min_a, max_a, plano_antigo=pd.DataFrame(), nome_arquivo="Up
             
             cnpjs = sorted(set([str(g["CNPJ"]) for g in grupo]))
             ufs = sorted(set([str(g["UF"]) for g in grupo]))
-            stats = sorted(set([str(g["Status"]) for g in grupo if str(g["Status"]) != "nan"]))
+            
+            # --- NOVO: Contabilidade EXATA de alunos por status dentro da turma ---
+            stats_counts = {}
+            for g in grupo:
+                s = str(g["Status"])
+                if s != "nan" and s.strip() != "":
+                    stats_counts[s] = stats_counts.get(s, 0) + 1
+            
+            # Codifica a contagem para ser decodificada pelo KPI (Ex: "Ativo:20|Espera:10")
+            stats_str_coded = "|".join([f"{k}:{v}" for k, v in stats_counts.items()])
             
             chave_busca = f"{cnpjs[0]}_{curso}"
             nome_original = mapa_nomes.get(chave_busca, f"{curso[:3].upper()}-{i+1:02d}")
@@ -165,7 +173,7 @@ def gerar_turmas(df, min_a, max_a, plano_antigo=pd.DataFrame(), nome_arquivo="Up
                 "Alunos": len(grupo),
                 "UFs": ", ".join(ufs),
                 "CNPJs": ", ".join(cnpjs),
-                "Status": ", ".join(stats) if stats else "Não Informado",
+                "Status": stats_str_coded if stats_str_coded else "Não Informado:0",
                 "Arquivo": nome_arquivo
             })
     return pd.DataFrame(turmas_lista)
@@ -177,8 +185,7 @@ st.title("📊 Planejador Inteligente de Turmas")
 
 plano_nuvem = carregar_do_banco()
 
-# Porta de Entrada
-arquivo = st.file_uploader("📤 Porta de Entrada (Subir Nova Planilha)", type=["xlsx"])
+arquivo = st.file_uploader("📤 Porta de Entrada (Subir Nova Planilha)", type=["xlsx"], help="O arquivo sobe para a nuvem assim que anexado.")
 
 df_final_trabalho = pd.DataFrame()
 df_base_original = pd.DataFrame()
@@ -188,9 +195,17 @@ if arquivo:
         df_raw = pd.read_excel(arquivo)
         df_base_original = df_raw.copy()
         
-        # Padronização de Colunas
-        df_raw.columns = [str(c).strip().title() for c in df_raw.columns]
-        df_raw = df_raw.rename(columns={"Uf": "UF", "Cnpj": "CNPJ", "Qtde": "Qtde"})
+        colunas_originais = df_raw.columns.tolist()
+        mapa_renomear = {}
+        for col in colunas_originais:
+            c_upper = str(col).strip().upper()
+            if c_upper in ["UF", "ESTADO"]: mapa_renomear[col] = "UF"
+            elif c_upper in ["CNPJ", "CLIENTE"]: mapa_renomear[col] = "CNPJ"
+            elif c_upper in ["QTDE", "QUANTIDADE", "ALUNOS"]: mapa_renomear[col] = "Qtde"
+            elif c_upper in ["STATUS", "SITUAÇÃO", "FASE", "SITUACAO"]: mapa_renomear[col] = "Status"
+            elif c_upper in ["CURSO", "NOME DO CURSO"]: mapa_renomear[col] = "Curso"
+        
+        df_raw = df_raw.rename(columns=mapa_renomear)
 
         if "Status" not in df_raw.columns:
             df_raw["Status"] = "Não Informado"
@@ -209,7 +224,7 @@ elif not plano_nuvem.empty:
     df_final_trabalho = plano_nuvem.copy()
 
 # =========================
-# GESTOR DE ARQUIVOS CENTRAL (Painel intuitivo para exclusão)
+# GESTOR DE ARQUIVOS CENTRAL
 # =========================
 if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
     arquivos_salvos = df_final_trabalho["Arquivo"].dropna().unique()
@@ -233,8 +248,8 @@ if not df_final_trabalho.empty:
     
     total_alunos = df_final_trabalho["Alunos"].sum()
     
-    # KPI Principal focado apenas em alunos
-    st.metric("Soma Total de Alunos no Planejamento", f"{total_alunos} alunos")
+    # KPI Principal focado exclusivamente em alunos (Limpo e Direto)
+    st.metric("Total Geral de Alunos no Planejamento", f"{total_alunos} alunos")
     
     c_met1, c_met2 = st.columns(2)
     
@@ -245,11 +260,27 @@ if not df_final_trabalho.empty:
                 st.write(f"**{r['Curso']}:** {r['Alunos']} alunos")
 
     with c_met2:
-        # MELHORIA 2: Novo nome e lógica focada apenas em alunos
+        # NOVO: Alunos por Tipo de Solicitação (Matemática Desempacotada)
         with st.expander("📋 Alunos por Tipo de Solicitação", expanded=True):
-            resumo_status = df_final_trabalho.groupby("Status")["Alunos"].sum().reset_index()
-            for _, r in resumo_status.iterrows():
-                st.write(f"**{r['Status']}:** {r['Alunos']} alunos")
+            status_totals = {}
+            
+            for _, row in df_final_trabalho.iterrows():
+                st_val = str(row["Status"])
+                if st_val and st_val != "nan":
+                    # Desempacota a string blindada (ex: "Em Atendimento:10|Aguardando:5")
+                    if "|" in st_val or ":" in st_val:
+                        partes = st_val.split("|")
+                        for p in partes:
+                            if ":" in p:
+                                s_nome, s_qtd = p.split(":")
+                                status_totals[s_nome] = status_totals.get(s_nome, 0) + int(s_qtd)
+                    else:
+                        # Fallback de segurança para planilhas antigas já salvas no banco
+                        status_totals[st_val] = status_totals.get(st_val, 0) + int(row["Alunos"])
+            
+            # Exibe a listagem limpa, individual e precisa
+            for st_nome, count in status_totals.items():
+                st.write(f"**{st_nome}:** {count} alunos")
 
     # =========================
     # TABELA E AUTO-SAVE
