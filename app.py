@@ -629,11 +629,10 @@ if not df_final_trabalho.empty:
                 st.session_state.turmas_ignoradas = []
                 st.rerun()
 
-    # =========================
-    # RELATÓRIO DE CNPJs (AGUARDANDO ATENDIMENTO)
+   # =========================
+    # RELATÓRIO DE CNPJs (AGUARDANDO ATENDIMENTO) - ESTILO EXPANDER
     # =========================
     st.divider()
-    # Mudança de estilo: Agora dentro de um expander conforme solicitado
     with st.expander("📄 Relatório de CNPJs (Aguardando atendimento)", expanded=True):
         st.write("CNPJs e quantidades de alunos com status 'Aguardando Atendimento', detalhados por UF.")
 
@@ -644,7 +643,6 @@ if not df_final_trabalho.empty:
             for index, row in df_final_trabalho.iterrows():
                 status_raw = str(row.get("Status", ""))
                 qtd_aguardando_linha = 0
-
                 for p in status_raw.split("|"):
                     if ":" in p:
                         label, valor = p.split(":")
@@ -658,12 +656,10 @@ if not df_final_trabalho.empty:
                     uf_principal = str(row.get("UFs", "Não Informada")).split(",")[0].strip()
 
                     for cnpj, qtd_cnpj in cnpjs_na_linha.items():
-                        pendencia_calculada = round(qtd_cnpj * fator_pendencia)
+                        pendencia_calculada = round(qtd_cnpj * faktor_pendencia)
                         if pendencia_calculada > 0:
                             lista_pendencias.append({
-                                "UF": uf_principal,
-                                "CNPJ": cnpj,
-                                "Qtd Aguardando": pendencia_calculada
+                                "UF": uf_principal, "CNPJ": cnpj, "Qtd Aguardando": pendencia_calculada
                             })
 
             if lista_pendencias:
@@ -671,11 +667,14 @@ if not df_final_trabalho.empty:
                 df_total_uf = df_detalhe.groupby("UF")["Qtd Aguardando"].sum().reset_index()
                 df_total_uf.columns = ["UF", "Total de Vagas Aguardando"]
 
+                # Exibição estilizada como o Resumo por Curso
                 st.write("**Total de Vagas Aguardando Atendimento por UF:**")
                 st.table(df_total_uf)
 
+                st.divider()
                 st.write("**Detalhamento por Cliente (CNPJ):**")
-                st.dataframe(df_detalhe.sort_values(by=["UF", "Qtd Aguardando"], ascending=[True, False]), use_container_width=True, hide_index=True)
+                st.dataframe(df_detalhe.sort_values(by=["UF", "Qtd Aguardando"], ascending=[True, False]), 
+                             use_container_width=True, hide_index=True)
 
                 def gerar_excel_pendencias(df_d, df_t):
                     output = BytesIO()
@@ -685,7 +684,7 @@ if not df_final_trabalho.empty:
                     return output.getvalue()
 
                 st.download_button(
-                    label="📥 Baixar Relatório (Excel)",
+                    label="📥 Baixar Relatório de Aguardando Atendimento (Excel)",
                     data=gerar_excel_pendencias(df_detalhe, df_total_uf),
                     file_name="relatorio_aguardando_atendimento.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
