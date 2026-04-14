@@ -38,7 +38,7 @@ def gerar_excel_final(plano_df, original_df):
     return output.getvalue()
 
 # =========================
-# SISTEMA DE LOGIN 
+# SISTEMA DE LOGIN
 # =========================
 if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
@@ -91,7 +91,7 @@ with st.sidebar:
 
 if not st.session_state.autenticado:
     st.title("📊 Planejador Inteligente de Turmas")
-    st.info("👋 Olá! Faça login na barra lateral para acessar o sistema.")
+    st.info("👋 Olá! Faça login na barra lateral para acessar o sistema. Você pode digitar a senha e apertar Enter.")
     st.stop()
 
 # =========================
@@ -215,7 +215,6 @@ if arquivo:
         df_motor = df_validos.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
         df_novo_arquivo = gerar_turmas(df_motor, min_alunos, max_alunos, plano_nuvem, arquivo.name)
         
-        # Salva imediatamente no banco adicionando aos existentes
         if supabase:
             supabase.table("planejamentos_turmas").delete().eq("Arquivo", arquivo.name).execute()
             dados_para_db = []
@@ -229,7 +228,6 @@ if arquivo:
             
         st.success(f"Arquivo '{arquivo.name}' adicionado ao planejamento com sucesso!")
         
-        # Recarrega a união de todos os arquivos do banco
         plano_nuvem = carregar_do_banco()
         df_final_trabalho = plano_nuvem.copy()
         
@@ -255,7 +253,7 @@ if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
                     st.rerun()
 
 # =========================
-# PAINEL DE INDICADORES (KPIs REFINADOS)
+# PAINEL DE INDICADORES (KPIs)
 # =========================
 if not df_final_trabalho.empty:
     st.divider()
@@ -291,12 +289,11 @@ if not df_final_trabalho.empty:
                 st.write(f"**{st_nome}:** {count} alunos")
 
     # =========================
-    # TABELA E SMART-SAVE (Fluidez garantida)
+    # TABELA E AUTO-SAVE 100% INVISÍVEL E SILENCIOSO
     # =========================
     st.divider()
     st.subheader("📚 Ajuste de Planejamento")
     
-    # Previne erros de indexação forçando uma limpeza limpa do df base
     df_final_trabalho = df_final_trabalho.reset_index(drop=True)
     
     if "id" not in df_final_trabalho.columns: df_final_trabalho["id"] = None
@@ -322,39 +319,33 @@ if not df_final_trabalho.empty:
         key="editor_principal"
     )
 
-    # Lógica de Salvamento Inteligente (Sem travamentos)
-    houve_mudanca = False
-    df_comp_old = df_final_trabalho[ordem_ok].fillna("").astype(str).to_dict("records")
-    df_comp_new = plano_editado.fillna("").astype(str).to_dict("records")
-    
-    if df_comp_old != df_comp_new:
-        houve_mudanca = True
-
-    if houve_mudanca:
-        st.warning("⚠️ Você alterou dados na tabela. Confirme para aplicar na nuvem.")
-        if st.button("💾 Salvar Alterações na Nuvem", type="primary", use_container_width=True):
-            if supabase:
-                try:
-                    dados_para_db = []
-                    # Varre a tabela usando o index para não perder a referência caso o nome da Turma mude
-                    for index, row in plano_editado.iterrows():
-                        original = df_final_trabalho.iloc[index]
-                        dados_para_db.append({
-                            "Curso": str(row.get("Curso", "")), 
-                            "Turma": str(row.get("Turma", "")), 
-                            "Alunos": int(row.get("Alunos", 0)),
-                            "UFs": str(original["UFs"]), 
-                            "CNPJs": str(row.get("CNPJs", "")), 
-                            "Status": str(original["Status"]),
-                            "Arquivo": str(original["Arquivo"])
-                        })
-                    
-                    supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
-                    supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
-                    st.toast("Sucesso! Planejamento salvo na nuvem.", icon="✅")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Erro ao salvar: {e}")
+    # Lógica de Salvamento Automático (Roda em background sem recarregar a tela)
+    if supabase and not plano_editado.empty:
+        df_comp_old = df_final_trabalho[ordem_ok].fillna("").astype(str).to_dict("records")
+        df_comp_new = plano_editado.fillna("").astype(str).to_dict("records")
+        
+        if df_comp_old != df_comp_new:
+            try:
+                dados_para_db = []
+                for index, row in plano_editado.iterrows():
+                    original = df_final_trabalho.iloc[index]
+                    dados_para_db.append({
+                        "Curso": str(row.get("Curso", "")), 
+                        "Turma": str(row.get("Turma", "")), 
+                        "Alunos": int(row.get("Alunos", 0)),
+                        "UFs": str(original["UFs"]), 
+                        "CNPJs": str(row.get("CNPJs", "")), 
+                        "Status": str(original["Status"]),
+                        "Arquivo": str(original["Arquivo"])
+                    })
+                
+                supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
+                supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
+                
+                # Apenas um aviso sutil que some sozinho
+                st.toast("Salvamento automático concluído na nuvem!", icon="☁️")
+            except Exception as e:
+                st.error(f"Erro ao salvar silenciosamente: {e}")
 
     # =========================
     # BUSCA, ALERTAS E GRÁFICOS
