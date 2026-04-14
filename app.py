@@ -78,7 +78,8 @@ with st.sidebar:
                 st.session_state.dados_salvos = pd.DataFrame()
                 st.cache_resource.clear()
                 st.rerun()
-            except: pass
+            except Exception:
+                pass
         
         st.divider()
         st.write("📂 **Modelos**")
@@ -101,7 +102,8 @@ if not st.session_state.autenticado:
 def init_connection():
     try:
         return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-    except: return None
+    except Exception:
+        return None
 
 supabase = init_connection()
 
@@ -110,7 +112,8 @@ def carregar_do_banco():
         try:
             res = supabase.table("planejamentos_turmas").select("*").execute()
             return pd.DataFrame(res.data)
-        except: return pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
     return pd.DataFrame()
 
 # NOVO: Cache local para fluidez da tabela
@@ -379,7 +382,8 @@ if not df_final_trabalho.empty:
                 supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
                 supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
                 
-            except pass
+            except Exception as e:
+                pass
 
     # =========================
     # BUSCA E ALERTAS (Gráficos Removidos para Limpeza Visual)
