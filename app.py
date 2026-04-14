@@ -275,7 +275,7 @@ if not df_final_trabalho.empty:
     # TABELA PRINCIPAL E DOWNLOAD IMEDIATO
     # =========================
     st.divider()
-    st.subheader("📚 Ajuste de Planejamento e Logística Manual")
+    st.subheader("📚 Planejamento e Logística de Turmas")
     colunas_ok = ["Curso", "Turma", "Alunos", "UFs", "CNPJs"]
     plano_editado = st.data_editor(
         df_final_trabalho[colunas_ok],
