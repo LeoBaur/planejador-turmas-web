@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import math
 from io import BytesIO
 from supabase import create_client, Client
@@ -76,6 +75,7 @@ with st.sidebar:
                 key = st.secrets["SUPABASE_KEY"]
                 client = create_client(url, key)
                 client.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
+                st.session_state.dados_salvos = pd.DataFrame()
                 st.cache_resource.clear()
                 st.rerun()
             except: pass
@@ -91,11 +91,11 @@ with st.sidebar:
 
 if not st.session_state.autenticado:
     st.title("📊 Planejador Inteligente de Turmas")
-    st.info("👋 Olá! Faça login na barra lateral para acessar o sistema. Você pode digitar a senha e apertar Enter.")
+    st.info("👋 Olá! Faça login na barra lateral para acessar o sistema.")
     st.stop()
 
 # =========================
-# CONEXÃO SUPABASE
+# CONEXÃO SUPABASE E MEMÓRIA CACHE
 # =========================
 @st.cache_resource
 def init_connection():
@@ -112,6 +112,10 @@ def carregar_do_banco():
             return pd.DataFrame(res.data)
         except: return pd.DataFrame()
     return pd.DataFrame()
+
+# NOVO: Cache local para fluidez da tabela
+if "dados_salvos" not in st.session_state:
+    st.session_state.dados_salvos = carregar_do_banco()
 
 # =========================
 # MOTOR DE GERAÇÃO
@@ -181,60 +185,64 @@ def gerar_turmas(df, min_a, max_a, plano_antigo=pd.DataFrame(), nome_arquivo="Up
 # =========================
 st.title("📊 Planejador Inteligente de Turmas")
 
-plano_nuvem = carregar_do_banco()
+arquivo = st.file_uploader("📤 Porta de Entrada (Subir Nova Planilha)", type=["xlsx"])
 
-arquivo = st.file_uploader("📤 Porta de Entrada (Subir Nova Planilha)", type=["xlsx"], help="O arquivo sobe para a nuvem assim que anexado.")
-
-df_final_trabalho = pd.DataFrame()
+df_final_trabalho = st.session_state.dados_salvos.copy()
 df_base_original = pd.DataFrame()
 
 if arquivo:
-    try:
-        df_raw = pd.read_excel(arquivo)
-        df_base_original = df_raw.copy()
-        
-        colunas_originais = df_raw.columns.tolist()
-        mapa_renomear = {}
-        for col in colunas_originais:
-            c_upper = str(col).strip().upper()
-            if c_upper in ["UF", "ESTADO"]: mapa_renomear[col] = "UF"
-            elif c_upper in ["CNPJ", "CLIENTE"]: mapa_renomear[col] = "CNPJ"
-            elif c_upper in ["QTDE", "QUANTIDADE", "ALUNOS"]: mapa_renomear[col] = "Qtde"
-            elif c_upper in ["STATUS", "SITUAÇÃO", "FASE", "SITUACAO"]: mapa_renomear[col] = "Status"
-            elif c_upper in ["CURSO", "NOME DO CURSO"]: mapa_renomear[col] = "Curso"
-        
-        df_raw = df_raw.rename(columns=mapa_renomear)
+    # Verificação inteligente para não reprocessar a mesma planilha
+    arquivo_ja_existe = False
+    if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
+        if arquivo.name in df_final_trabalho["Arquivo"].values:
+            arquivo_ja_existe = True
 
-        if "Status" not in df_raw.columns:
-            df_raw["Status"] = "Não Informado"
-
-        df_raw["CNPJ"] = df_raw["CNPJ"].astype(str).str.strip()
-        df_raw["Qtde"] = pd.to_numeric(df_raw["Qtde"], errors='coerce').fillna(0).astype(int)
-        df_validos = df_raw[df_raw["Qtde"] > 0].copy()
-
-        df_motor = df_validos.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
-        df_novo_arquivo = gerar_turmas(df_motor, min_alunos, max_alunos, plano_nuvem, arquivo.name)
-        
-        if supabase:
-            supabase.table("planejamentos_turmas").delete().eq("Arquivo", arquivo.name).execute()
-            dados_para_db = []
-            for _, row in df_novo_arquivo.iterrows():
-                dados_para_db.append({
-                    "Curso": str(row["Curso"]), "Turma": str(row["Turma"]), "Alunos": int(row["Alunos"]),
-                    "UFs": str(row["UFs"]), "CNPJs": str(row["CNPJs"]), "Status": str(row["Status"]),
-                    "Arquivo": str(row["Arquivo"])
-                })
-            supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
+    if arquivo_ja_existe:
+        st.info(f"O arquivo '{arquivo.name}' já está no painel. Se for uma nova versão, exclua a antiga no gestor abaixo primeiro.")
+    else:
+        try:
+            df_raw = pd.read_excel(arquivo)
+            df_base_original = df_raw.copy()
             
-        st.success(f"Arquivo '{arquivo.name}' adicionado ao planejamento com sucesso!")
-        
-        plano_nuvem = carregar_do_banco()
-        df_final_trabalho = plano_nuvem.copy()
-        
-    except Exception as e:
-        st.error(f"Erro no processamento da planilha: {e}")
-elif not plano_nuvem.empty:
-    df_final_trabalho = plano_nuvem.copy()
+            colunas_originais = df_raw.columns.tolist()
+            mapa_renomear = {}
+            for col in colunas_originais:
+                c_upper = str(col).strip().upper()
+                if c_upper in ["UF", "ESTADO"]: mapa_renomear[col] = "UF"
+                elif c_upper in ["CNPJ", "CLIENTE"]: mapa_renomear[col] = "CNPJ"
+                elif c_upper in ["QTDE", "QUANTIDADE", "ALUNOS"]: mapa_renomear[col] = "Qtde"
+                elif c_upper in ["STATUS", "SITUAÇÃO", "FASE", "SITUACAO"]: mapa_renomear[col] = "Status"
+                elif c_upper in ["CURSO", "NOME DO CURSO"]: mapa_renomear[col] = "Curso"
+            
+            df_raw = df_raw.rename(columns=mapa_renomear)
+
+            if "Status" not in df_raw.columns:
+                df_raw["Status"] = "Não Informado"
+
+            df_raw["CNPJ"] = df_raw["CNPJ"].astype(str).str.strip()
+            df_raw["Qtde"] = pd.to_numeric(df_raw["Qtde"], errors='coerce').fillna(0).astype(int)
+            df_validos = df_raw[df_raw["Qtde"] > 0].copy()
+
+            df_motor = df_validos.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
+            df_novo_arquivo = gerar_turmas(df_motor, min_alunos, max_alunos, df_final_trabalho, arquivo.name)
+            
+            if supabase:
+                supabase.table("planejamentos_turmas").delete().eq("Arquivo", arquivo.name).execute()
+                dados_para_db = []
+                for _, row in df_novo_arquivo.iterrows():
+                    dados_para_db.append({
+                        "Curso": str(row["Curso"]), "Turma": str(row["Turma"]), "Alunos": int(row["Alunos"]),
+                        "UFs": str(row["UFs"]), "CNPJs": str(row["CNPJs"]), "Status": str(row["Status"]),
+                        "Arquivo": str(row["Arquivo"])
+                    })
+                supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
+                
+            st.success(f"Arquivo '{arquivo.name}' adicionado ao planejamento!")
+            st.session_state.dados_salvos = carregar_do_banco()
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Erro no processamento da planilha: {e}")
 
 # =========================
 # GESTOR DE ARQUIVOS CENTRAL
@@ -248,9 +256,10 @@ if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
                 c1, c2 = st.columns([8, 1])
                 c1.write(f"📄 **{arq}**")
                 if c2.button("❌", key=f"del_{arq}", help=f"Remover dados de {arq}"):
-                    supabase.table("planejamentos_turmas").delete().eq("Arquivo", arq).execute()
-                    st.cache_resource.clear()
-                    st.rerun()
+                    if supabase:
+                        supabase.table("planejamentos_turmas").delete().eq("Arquivo", arq).execute()
+                        st.session_state.dados_salvos = carregar_do_banco()
+                        st.rerun()
 
 # =========================
 # PAINEL DE INDICADORES (KPIs)
@@ -274,22 +283,46 @@ if not df_final_trabalho.empty:
         with st.expander("📋 Alunos por Tipo de Solicitação", expanded=True):
             status_totals = {}
             for _, row in df_final_trabalho.iterrows():
-                st_val = str(row["Status"])
-                if st_val and st_val != "nan":
-                    if "|" in st_val or ":" in st_val:
-                        partes = st_val.split("|")
-                        for p in partes:
-                            if ":" in p:
-                                s_nome, s_qtd = p.split(":")
-                                status_totals[s_nome] = status_totals.get(s_nome, 0) + int(s_qtd)
-                    else:
-                        status_totals[st_val] = status_totals.get(st_val, 0) + int(row["Alunos"])
+                st_val = str(row["Status"]).strip()
+                total_alunos_row = int(row["Alunos"])
+                
+                if not st_val or st_val == "nan":
+                    st_val = "Não Informado"
+                
+                if ":" in st_val or "|" in st_val:
+                    partes = st_val.split("|")
+                    soma_interna = sum(int(p.split(":")[1]) for p in partes if ":" in p)
+                    if soma_interna == 0: soma_interna = 1
+                    
+                    distribuido = 0
+                    partes_validas = [p for p in partes if ":" in p]
+                    
+                    for i, p in enumerate(partes_validas):
+                        s_nome, s_qtd = p.split(":")
+                        s_qtd = int(s_qtd)
+                        if i == len(partes_validas) - 1:
+                            adjusted_qtd = total_alunos_row - distribuido
+                        else:
+                            adjusted_qtd = round((s_qtd / soma_interna) * total_alunos_row)
+                            distribuido += adjusted_qtd
+                        status_totals[s_nome] = status_totals.get(s_nome, 0) + adjusted_qtd
+                        
+                elif "," in st_val:
+                    partes = [p.strip() for p in st_val.split(",") if p.strip()]
+                    if not partes: partes = ["Não Informado"]
+                    val_base = total_alunos_row // len(partes)
+                    sobra = total_alunos_row % len(partes)
+                    for i, p in enumerate(partes):
+                        adjusted_qtd = val_base + (1 if i < sobra else 0)
+                        status_totals[p] = status_totals.get(p, 0) + adjusted_qtd
+                else:
+                    status_totals[st_val] = status_totals.get(st_val, 0) + total_alunos_row
             
             for st_nome, count in status_totals.items():
                 st.write(f"**{st_nome}:** {count} alunos")
 
     # =========================
-    # TABELA E AUTO-SAVE 100% INVISÍVEL E SILENCIOSO
+    # TABELA E AUTO-SAVE BLINDADO (Sem travamentos)
     # =========================
     st.divider()
     st.subheader("📚 Ajuste de Planejamento")
@@ -319,7 +352,7 @@ if not df_final_trabalho.empty:
         key="editor_principal"
     )
 
-    # Lógica de Salvamento Automático (Roda em background sem recarregar a tela)
+    # LÓGICA DE SALVAMENTO DE ALTA PERFORMANCE
     if supabase and not plano_editado.empty:
         df_comp_old = df_final_trabalho[ordem_ok].fillna("").astype(str).to_dict("records")
         df_comp_new = plano_editado.fillna("").astype(str).to_dict("records")
@@ -339,16 +372,17 @@ if not df_final_trabalho.empty:
                         "Arquivo": str(original["Arquivo"])
                     })
                 
+                # 1. Atualiza a memória instantaneamente para evitar bugs na digitação
+                st.session_state.dados_salvos = pd.DataFrame(dados_para_db)
+                
+                # 2. Salva silenciosamente no Supabase
                 supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
                 supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
                 
-                # Apenas um aviso sutil que some sozinho
-                st.toast("Salvamento automático concluído na nuvem!", icon="☁️")
-            except Exception as e:
-                st.error(f"Erro ao salvar silenciosamente: {e}")
+            except pass
 
     # =========================
-    # BUSCA, ALERTAS E GRÁFICOS
+    # BUSCA E ALERTAS (Gráficos Removidos para Limpeza Visual)
     # =========================
     col_l, col_r = st.columns(2)
     with col_l:
@@ -372,10 +406,4 @@ if not df_final_trabalho.empty:
             st.success("Quórum atingido em todas as turmas.")
 
     st.divider()
-    c1, c2, c3 = st.columns(3)
-    resumo_t = plano_editado.groupby("Curso").size().reset_index(name="Turmas")
-    with c1: st.plotly_chart(px.bar(resumo_t, x="Curso", y="Turmas", title="Turmas por Curso"), use_container_width=True)
-    with c2: st.plotly_chart(px.pie(plano_editado, names="Curso", title="Mix de Cursos"), use_container_width=True)
-    with c3: st.plotly_chart(px.histogram(plano_editado, x="Alunos", title="Distribuição de Alunos"), use_container_width=True)
-
     st.download_button("📥 Baixar Excel Completo", data=gerar_excel_final(plano_editado, df_base_original), file_name="planejamento_senac.xlsx")
