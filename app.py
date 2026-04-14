@@ -341,88 +341,48 @@ if not df_final_trabalho.empty:
                             st.session_state.turmas_ignoradas.append(t_b["Turma"]); st.rerun()
         else: st.success("Tudo em conformidade!")
 
-# =========================
-    # TABELA COM EDIÇÃO LIVRE E DOWNLOAD IMEDIATO
     # =========================
-    st.divider()
-    st.subheader("📚 Ajuste de Planejamento e Logística Manual")
-    
-    df_final_trabalho = df_final_trabalho.reset_index(drop=True)
-    colunas_ok = ["Curso", "Turma", "Alunos", "UFs", "CNPJs"]
-    
-    plano_editado = st.data_editor(
-        df_final_trabalho[colunas_ok],
-        column_config={
-            "Curso": st.column_config.TextColumn("Curso", disabled=True, width="medium"),
-            "Turma": st.column_config.TextColumn("Turma", width="medium"),
-            "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium"),
-            "CNPJs": st.column_config.TextColumn("CNPJs", width=1000), 
-            "Alunos": st.column_config.NumberColumn("Alunos")
-        },
-        use_container_width=True, hide_index=True, key="editor_principal"
-    )
-
-    # Botão de download da planilha principal (conforme solicitado: logo abaixo da planilha)
-    st.download_button("📥 Baixar Planilha Principal (Excel Completo)", 
-                       data=gerar_excel_final(plano_editado, df_base_original), 
-                       file_name="planejamento_senac.xlsx")
-
-    # (Mantenha aqui seu bloco de salvamento background e Assistente de Remanejamento)
-
-    # =========================
-    # RELATÓRIO: AGUARDANDO ATENDIMENTO (ESTILO RESUMO POR CURSO)
+    # RELATÓRIO: AGUARDANDO ATENDIMENTO (ESTILO EXPANDER)
     # =========================
     st.divider()
     with st.expander("📄 Relatório de CNPJs (Aguardando atendimento)", expanded=True):
         st.write("Consolidação dos CNPJs e quantidades de alunos com status 'Aguardando Atendimento', detalhados por UF.")
+        pendencias = []
+        status_alvo = "Aguardando Atendimento"
+        for _, row in df_final_trabalho.iterrows():
+            status_raw, qtd_aguardando = str(row.get("Status", "")), 0
+            for p in status_raw.split("|"):
+                if ":" in p:
+                    label, valor = p.split(":")
+                    if higienizar_status(label) == status_alvo: qtd_aguardando = int(valor)
+            if qtd_aguardando > 0:
+                cnpjs_row = parse_cnpjs(row.get("CNPJs", ""))
+                total_alunos_row = sum(cnpjs_row.values())
+                fator = qtd_aguardando / total_alunos_row if total_alunos_row > 0 else 0
+                uf_linha = str(row.get("UFs", "N/A")).split(",")[0].strip()
+                for c, q in cnpjs_row.items():
+                    qtd_pendente = round(q * fator)
+                    if qtd_pendente > 0: pendencias.append({"UF": uf_linha, "CNPJ": c, "Qtd Aguardando": qtd_pendente})
 
-        if not df_final_trabalho.empty:
-            status_alvo = "Aguardando Atendimento"
-            lista_pendencias = []
+        if pendencias:
+            df_detalhe = pd.DataFrame(pendencias).groupby(["UF", "CNPJ"], as_index=False)["Qtd Aguardando"].sum()
+            df_total_uf = df_detalhe.groupby("UF")["Qtd Aguardando"].sum().reset_index()
+            df_total_uf.columns = ["UF", "Total de Vagas Aguardando"]
 
-            for index, row in df_final_trabalho.iterrows():
-                status_raw, qtd_aguardando_linha = str(row.get("Status", "")), 0
-                for p in status_raw.split("|"):
-                    if ":" in p:
-                        label, valor = p.split(":")
-                        if higienizar_status(label) == status_alvo:
-                            qtd_aguardando_linha = int(valor)
+            st.write("**Total de Vagas Aguardando Atendimento por UF:**")
+            st.table(df_total_uf)
+            st.write("**Detalhamento por Cliente (CNPJ):**")
+            st.dataframe(df_detalhe.sort_values(by=["UF", "Qtd Aguardando"], ascending=[True, False]), use_container_width=True, hide_index=True)
 
-                if qtd_aguardando_linha > 0:
-                    cnpjs_na_linha = parse_cnpjs(row.get("CNPJs", ""))
-                    total_alunos_linha = sum(cnpjs_na_linha.values())
-                    fator = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
-                    uf_linha = str(row.get("UFs", "N/A")).split(",")[0].strip()
+            def gerar_excel_pendencias(df_d, df_t):
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                    df_t.to_excel(writer, index=False, sheet_name="Resumo_por_UF")
+                    df_d.to_excel(writer, index=False, sheet_name="Detalhe_por_CNPJ")
+                return output.getvalue()
 
-                    for cnpj, qtd_cnpj in cnpjs_na_linha.items():
-                        pendencia_calculada = round(qtd_cnpj * fator)
-                        if pendencia_calculada > 0:
-                            lista_pendencias.append({"UF": uf_linha, "CNPJ": cnpj, "Qtd": pendencia_calculada})
-
-            if lista_pendencias:
-                df_detalhe = pd.DataFrame(lista_pendencias).groupby(["UF", "CNPJ"], as_index=False)["Qtd"].sum()
-                df_total_uf = df_detalhe.groupby("UF")["Qtd"].sum().reset_index()
-
-                # --- NOVO DESIGN: Lista limpa com ícones (Igual ao Resumo por Curso) ---
-                st.write("**Total de Vagas Aguardando Atendimento por UF:**")
-                for _, row_uf in df_total_uf.iterrows():
-                    st.write(f"📍 **{row_uf['UF']}:** {int(row_uf['Qtd'])} alunos aguardando")
-                
-                st.divider()
-                st.write("**Detalhamento por Cliente (CNPJ):**")
-                st.dataframe(df_detalhe.sort_values(by=["UF", "Qtd"], ascending=[True, False]), 
-                             use_container_width=True, hide_index=True)
-
-                def gerar_excel_pendencias(df_d, df_t):
-                    output = BytesIO()
-                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                        df_t.to_excel(writer, index=False, sheet_name="Resumo_por_UF")
-                        df_d.to_excel(writer, index=False, sheet_name="Detalhe_por_CNPJ")
-                    return output.getvalue()
-
-                st.download_button(label="📥 Baixar Relatório (Excel)",
-                                   data=gerar_excel_pendencias(df_detalhe, df_total_uf),
-                                   file_name="relatorio_aguardando_atendimento.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            else:
-                st.info("Nenhuma pendência encontrada.")
+            st.download_button(label="📥 Baixar Relatório de Aguardando Atendimento (Excel)",
+                               data=gerar_excel_pendencias(df_detalhe, df_total_uf),
+                               file_name="relatorio_aguardando_atendimento.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        else: st.info("Nenhuma pendência encontrada.")
