@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import math
 import threading
+import re
 from io import BytesIO
 from supabase import create_client, Client
 
@@ -61,18 +62,36 @@ def get_next_turma_name(curso, nomes_usados):
     while True:
         name = f"{prefix}-{i:02d}"
         if name not in nomes_usados:
-            nomes_usados.append(name)
             return name
         i += 1
 
+def add_status(status_dict, status_str, qtde):
+    if "|" in status_str or ":" in status_str:
+        parts = [p for p in status_str.split("|") if ":" in p]
+        if not parts:
+            k_clean = higienizar_status(status_str)
+            status_dict[k_clean] = status_dict.get(k_clean, 0) + qtde
+            return
+        soma_interna = sum(int(p.split(":")[1]) for p in parts)
+        if soma_interna == 0: soma_interna = 1
+        distribuido = 0
+        for i, p in enumerate(parts):
+            k, v = p.split(":")
+            k_clean = higienizar_status(k)
+            add_q = qtde - distribuido if i == len(parts) - 1 else round((int(v) / soma_interna) * qtde)
+            distribuido += add_q
+            status_dict[k_clean] = status_dict.get(k_clean, 0) + add_q
+    else:
+        k_clean = higienizar_status(status_str)
+        status_dict[k_clean] = status_dict.get(k_clean, 0) + qtde
+
 # =========================
-# LÓGICA DE FUSÃO E DISTRIBUIÇÃO MANUAL (Assistente)
+# LÓGICA DE FUSÃO MANUAL E DISTRIBUIÇÃO (Assistente)
 # =========================
 def fundir_turmas(nome_origem, nome_destino, curso, url, key):
     client = create_client(url, key)
     res = client.table("planejamentos_turmas").select("*").eq("Curso", curso).in_("Turma", [nome_origem, nome_destino]).execute()
     df_db = pd.DataFrame(res.data)
-    
     if len(df_db) == 2:
         origem = df_db[df_db["Turma"] == nome_origem].iloc[0]
         destino = df_db[df_db["Turma"] == nome_destino].iloc[0]
@@ -83,19 +102,14 @@ def fundir_turmas(nome_origem, nome_destino, curso, url, key):
         novos_arqs = merge_strings_list(origem["Arquivo"], destino["Arquivo"])
         
         stats_dict = {}
-        for s in [str(origem["Status"]), str(destino["Status"])]:
-            for p in s.split("|"):
-                if ":" in p:
-                    k, v = p.split(":")
-                    k_clean = higienizar_status(k)
-                    stats_dict[k_clean] = stats_dict.get(k_clean, 0) + int(v)
-        novo_status = "|".join([f"{k}:{v}" for k, v in stats_dict.items()])
+        add_status(stats_dict, str(origem["Status"]), int(origem["Alunos"]))
+        add_status(stats_dict, str(destino["Status"]), int(destino["Alunos"]))
+        novo_status = "|".join([f"{k}:{v}" for k, v in stats_dict.items() if v > 0])
         
         client.table("planejamentos_turmas").update({
             "Alunos": novos_alunos, "CNPJs": novos_cnpjs, "UFs": novas_ufs,
             "Arquivo": novos_arqs, "Status": novo_status
         }).eq("id", destino["id"]).execute()
-        
         client.table("planejamentos_turmas").delete().eq("id", origem["id"]).execute()
 
 def distribuir_turma(nome_origem, curso, url, key):
@@ -115,10 +129,7 @@ def distribuir_turma(nome_origem, curso, url, key):
     adds = [base_add + (1 if i < sobra_add else 0) for i in range(num_destinos)]
 
     origem_stats = {}
-    for p in str(origem["Status"]).split("|"):
-        if ":" in p:
-            k, v = p.split(":")
-            origem_stats[higienizar_status(k)] = int(v)
+    add_status(origem_stats, str(origem["Status"]), alunos_total)
 
     for i, (_, dest) in enumerate(destinos.iterrows()):
         if adds[i] == 0: continue
@@ -128,10 +139,7 @@ def distribuir_turma(nome_origem, curso, url, key):
         new_arqs = merge_strings_list(dest["Arquivo"], origem["Arquivo"])
 
         dest_stats = {}
-        for p in str(dest["Status"]).split("|"):
-            if ":" in p:
-                k, v = p.split(":")
-                dest_stats[higienizar_status(k)] = int(v)
+        add_status(dest_stats, str(dest["Status"]), int(dest["Alunos"]))
 
         allocated = 0
         for k in list(origem_stats.keys()):
@@ -175,7 +183,7 @@ with st.sidebar:
             st.rerun()
         
         st.divider()
-        st.subheader("⚙️ Configurações")
+        st.subheader("⚙️ Configurações (LIMITES ABSOLUTOS)")
         min_alunos = st.number_input("Mínimo por turma", min_value=1, value=25)
         max_alunos = st.number_input("Máximo por turma", min_value=1, value=45)
         
@@ -223,7 +231,7 @@ if "dados_salvos" not in st.session_state:
     st.session_state.dados_salvos = carregar_do_banco()
 
 # =========================
-# INTERFACE PRINCIPAL E UPLOAD INTELIGENTE
+# INTERFACE PRINCIPAL E REPACTUAÇÃO ESTRITA
 # =========================
 st.title("📊 Planejador Inteligente de Turmas")
 
@@ -241,12 +249,11 @@ if arquivo:
     if arquivo_ja_existe:
         st.info(f"O arquivo '{arquivo.name}' já foi processado e está mesclado no banco.")
     else:
-        if st.button("🚀 Processar, Balancear Lotes e Salvar", type="primary"):
+        if st.button("🚀 Processar e Aplicar Limites Estritos", type="primary"):
             try:
                 df_raw = pd.read_excel(arquivo)
                 df_base_original = df_raw.copy()
                 
-                # Padronização de Colunas
                 colunas_originais = df_raw.columns.tolist()
                 mapa_renomear = {}
                 for col in colunas_originais:
@@ -266,119 +273,133 @@ if arquivo:
                 df_motor = df_validos.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
 
                 turmas_estado = df_final_trabalho.to_dict('records') if not df_final_trabalho.empty else []
-                relatorio_remanejamento = []
+                cursos_na_planilha = df_motor["Curso"].unique()
                 
-                for curso in df_motor["Curso"].unique():
-                    dados_curso = df_motor[df_motor["Curso"] == curso]
+                turmas_intactas = [t for t in turmas_estado if t["Curso"] not in cursos_na_planilha]
+                turmas_reconstruidas = []
+                
+                for curso in cursos_na_planilha:
+                    lotes_curso = []
+                    turmas_existentes = [t for t in turmas_estado if t["Curso"] == curso]
+                    nomes_usados = [t["Turma"] for t in turmas_estado if t["Curso"] != curso]
                     
-                    # 1. Empacotar alunos em BLOCOS INTEIROS (Lotes) por CNPJ
-                    lotes_novos = []
-                    for _, row in dados_curso.iterrows():
-                        qtde = int(row["Qtde"])
-                        # Se um CNPJ pediu 50, somos forçados a dividi-lo em 45 e 5 para respeitar a regra máxima.
-                        while qtde > max_alunos:
-                            lotes_novos.append({"cnpj": str(row["CNPJ"]), "qtde": max_alunos, "uf": str(row["UF"]), "status": higienizar_status(row.get("Status")), "arquivo": arquivo.name})
-                            qtde -= max_alunos
-                        if qtde > 0:
-                            lotes_novos.append({"cnpj": str(row["CNPJ"]), "qtde": qtde, "uf": str(row["UF"]), "status": higienizar_status(row.get("Status")), "arquivo": arquivo.name})
-                    
-                    # Ordena do maior pro menor para encaixar as peças grandes primeiro (Bin Packing)
-                    lotes_novos.sort(key=lambda x: x['qtde'], reverse=True)
-                    
-                    # Prepara "Envelopes" para manipular as turmas sem quebrar o banco legado
-                    nomes_usados = [t["Turma"] for t in turmas_estado if t["Curso"] == curso]
-                    envelopes = []
-                    for t in turmas_estado:
-                        if t["Curso"] == curso:
-                            envelopes.append({"base": t, "lotes_inseridos": [], "alunos_total": int(t["Alunos"])})
-                    
-                    # 2. Distribuição Top-Off (Encaixando blocos)
-                    for lote in lotes_novos:
-                        alocado = False
-                        for env in envelopes:
-                            if env["alunos_total"] + lote["qtde"] <= max_alunos:
-                                env["lotes_inseridos"].append(lote)
-                                env["alunos_total"] += lote["qtde"]
-                                alocado = True
-                                break
+                    # 1. Extrai lotes exatos do Banco Legado
+                    for t in turmas_existentes:
+                        partes = str(t.get("CNPJs", "")).split(",")
+                        itens_parseados = []
+                        total_parseado = 0
+                        for p in partes:
+                            p = p.strip()
+                            if not p: continue
+                            match = re.match(r"(.+?)\s*\((\d+)\)", p)
+                            if match:
+                                c = match.group(1).strip()
+                                q = int(match.group(2))
+                                itens_parseados.append({"cnpj": c, "qtde": q})
+                                total_parseado += q
+                            else:
+                                itens_parseados.append({"cnpj": p, "qtde": 0})
                         
-                        if not alocado: # Cria turma nova
-                            nome_novo = get_next_turma_name(curso, nomes_usados)
-                            nova_turma = {
-                                "id": None, "Curso": curso, "Turma": nome_novo, "Alunos": 0,
-                                "UFs": "", "CNPJs": "", "Status": "", "Arquivo": ""
-                            }
-                            envelopes.append({"base": nova_turma, "lotes_inseridos": [lote], "alunos_total": lote["qtde"]})
-                            turmas_estado.append(nova_turma) # Referência cruza pro estado global
+                        if total_parseado == 0 and itens_parseados:
+                            base = int(t["Alunos"]) // len(itens_parseados)
+                            sobra = int(t["Alunos"]) % len(itens_parseados)
+                            for i, pi in enumerate(itens_parseados):
+                                pi["qtde"] = base + (1 if i < sobra else 0)
+                                
+                        for pi in itens_parseados:
+                            if pi["qtde"] > 0:
+                                lotes_curso.append({
+                                    "cnpj": pi["cnpj"], "qtde": pi["qtde"],
+                                    "uf": str(t.get("UFs", "")), "status": str(t.get("Status", "")), 
+                                    "arquivo": str(t.get("Arquivo", "Banco"))
+                                })
+                                
+                    # 2. Adiciona lotes novos da Planilha
+                    dados_curso = df_motor[df_motor["Curso"] == curso]
+                    for _, row in dados_curso.iterrows():
+                        if int(row["Qtde"]) > 0:
+                            lotes_curso.append({
+                                "cnpj": str(row["CNPJ"]), "qtde": int(row["Qtde"]),
+                                "uf": str(row["UF"]), "status": higienizar_status(row.get("Status")), 
+                                "arquivo": arquivo.name
+                            })
+                            
+                    # 3. MATEMÁTICA ESTRITA DE LIMITES (Repactuação Geral)
+                    total_alunos = sum(l["qtde"] for l in lotes_curso)
+                    if total_alunos == 0: continue
                     
-                    # 3. ALGORITMO ROBIN HOOD (Balanceamento Fino)
-                    envelopes_pobres = [e for e in envelopes if e["alunos_total"] < min_alunos and len(e["lotes_inseridos"]) > 0]
-                    envelopes_ricos = [e for e in envelopes if e["alunos_total"] >= min_alunos]
+                    k_turmas = math.ceil(total_alunos / max_alunos)
+                    alvos = []
                     
-                    for pobre in envelopes_pobres:
-                        while pobre["alunos_total"] < min_alunos:
-                            bloco_roubado = False
-                            for rico in envelopes_ricos:
-                                for lote_candidato in rico["lotes_inseridos"]:
-                                    # Verifica se ao mover o lote, o rico continua saudável e o pobre não estoura o limite
-                                    if (rico["alunos_total"] - lote_candidato["qtde"] >= min_alunos) and \
-                                       (pobre["alunos_total"] + lote_candidato["qtde"] <= max_alunos):
-                                        
-                                        # Move o Lote
-                                        rico["lotes_inseridos"].remove(lote_candidato)
-                                        pobre["lotes_inseridos"].append(lote_candidato)
-                                        rico["alunos_total"] -= lote_candidato["qtde"]
-                                        pobre["alunos_total"] += lote_candidato["qtde"]
-                                        
-                                        msg = f"🔄 **{curso}:** O CNPJ **{lote_candidato['cnpj']}** ({lote_candidato['qtde']} alunos) foi realocado da turma **{rico['base']['Turma']}** para a **{pobre['base']['Turma']}** para garantir o quórum."
-                                        relatorio_remanejamento.append(msg)
-                                        bloco_roubado = True
-                                        break # Quebra o loop dos lotes do rico
-                                if bloco_roubado: break # Vai reavaliar o while do pobre
+                    # Checa se é matematicamente possível bater o mínimo
+                    if total_alunos < k_turmas * min_alunos:
+                        base = total_alunos // k_turmas
+                        sobra = total_alunos % k_turmas
+                        alvos = [base + (1 if i < sobra else 0) for i in range(k_turmas)]
+                    else:
+                        alvos = [min_alunos] * k_turmas
+                        restante = total_alunos - (k_turmas * min_alunos)
+                        for i in range(k_turmas):
+                            espaco = max_alunos - alvos[i]
+                            add = min(espaco, restante)
+                            alvos[i] += add
+                            restante -= add
                             
-                            # Se olhou todos os ricos e não achou peça que encaixe perfeitamente, para tentar arrumar
-                            if not bloco_roubado: break 
+                    # Ordena lotes do maior pro menor para preservar CNPJs inteiros o máximo possível
+                    lotes_curso.sort(key=lambda x: x["qtde"], reverse=True)
+                    fila_lotes = lotes_curso.copy()
+                    
+                    for alvo in alvos:
+                        nome_turma = get_next_turma_name(curso, nomes_usados)
+                        nomes_usados.append(nome_turma)
+                        
+                        bin_atual = {
+                            "id": None, "Curso": curso, "Turma": nome_turma,
+                            "Alunos": 0, "CNPJs": "", "UFs": "", "Status": "", "Arquivo": "",
+                            "_stats_dict": {}, "_cnpjs_list": []
+                        }
+                        
+                        alvo_restante = alvo
+                        while alvo_restante > 0 and fila_lotes:
+                            lote = fila_lotes.pop(0)
+                            
+                            if lote["qtde"] <= alvo_restante:
+                                cabe = lote
+                            else:
+                                # Corte Cirúrgico para respeitar 100% o limite
+                                cabe = lote.copy()
+                                cabe["qtde"] = alvo_restante
+                                sobra = lote.copy()
+                                sobra["qtde"] = lote["qtde"] - alvo_restante
+                                fila_lotes.insert(0, sobra) # Joga o resto pra próxima turma
+                                
+                            bin_atual["Alunos"] += cabe["qtde"]
+                            bin_atual["UFs"] = merge_strings_list(bin_atual["UFs"], cabe["uf"])
+                            bin_atual["Arquivo"] = merge_strings_list(bin_atual["Arquivo"], cabe["arquivo"])
+                            
+                            # Formatação rica preservada
+                            bin_atual["_cnpjs_list"].append(f"{cabe['cnpj']} ({cabe['qtde']})")
+                            add_status(bin_atual["_stats_dict"], cabe["status"], cabe["qtde"])
+                            
+                            alvo_restante -= cabe["qtde"]
+                            
+                        # Compila strings finais
+                        bin_atual["CNPJs"] = ", ".join(bin_atual["_cnpjs_list"])
+                        bin_atual["Status"] = "|".join([f"{k}:{v}" for k, v in bin_atual["_stats_dict"].items() if v > 0])
+                        del bin_atual["_stats_dict"]
+                        del bin_atual["_cnpjs_list"]
+                        
+                        turmas_reconstruidas.append(bin_atual)
 
-                    # 4. Aplica os Lotes que ficaram nos envelopes para dentro das turmas base
-                    for env in envelopes:
-                        if env["lotes_inseridos"]:
-                            t = env["base"]
-                            t["Alunos"] = env["alunos_total"]
-                            
-                            # Formatação visual rica em detalhes: CNPJ (Qtde)
-                            cnpjs_atuais = [c.strip() for c in t["CNPJs"].split(",")] if t["CNPJs"] else []
-                            for lote in env["lotes_inseridos"]:
-                                cnpjs_atuais.append(f"{lote['cnpj']} ({lote['qtde']})")
-                            t["CNPJs"] = ", ".join(cnpjs_atuais)
-                            
-                            t["UFs"] = merge_strings_list(t["UFs"], ", ".join([l['uf'] for l in env["lotes_inseridos"]]))
-                            t["Arquivo"] = merge_strings_list(t["Arquivo"], arquivo.name)
-                            
-                            stats_dict = {}
-                            for p in str(t["Status"]).split("|"):
-                                if ":" in p:
-                                    k, v = p.split(":")
-                                    stats_dict[higienizar_status(k)] = int(v)
-                            for lote in env["lotes_inseridos"]:
-                                stats_dict[lote["status"]] = stats_dict.get(lote["status"], 0) + lote["qtde"]
-                            t["Status"] = "|".join([f"{k}:{v}" for k, v in stats_dict.items()])
-
-                # Salva o Estado
+                # Salva o Estado Consolidado e Perfeito
+                turmas_finais = turmas_intactas + turmas_reconstruidas
                 if supabase:
                     supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
-                    for t in turmas_estado:
+                    for t in turmas_finais:
                         if "id" in t: del t["id"]
-                    supabase.table("planejamentos_turmas").insert(turmas_estado).execute()
+                    supabase.table("planejamentos_turmas").insert(turmas_finais).execute()
                     
-                st.success(f"Arquivo '{arquivo.name}' preenchido em blocos fiéis com sucesso!")
-                
-                # Exibe o Relatório de Inteligência
-                if relatorio_remanejamento:
-                    with st.expander("🤖 Relatório de Inteligência: Balanceamento de Sobras Ativado", expanded=True):
-                        st.write("Identificamos sobras nas turmas novas. O sistema executou as seguintes manobras para manter as turmas dentro do mínimo exigido, sem quebrar os CNPJs:")
-                        for r in relatorio_remanejamento:
-                            st.info(r)
-                            
+                st.success(f"Arquivo processado! Turmas repactuadas respeitando estritamente os limites de {min_alunos} a {max_alunos} alunos.")
                 st.session_state.dados_salvos = carregar_do_banco()
                 if "editor_principal" in st.session_state: del st.session_state["editor_principal"]
                 if "last_saved_hash" in st.session_state: del st.session_state["last_saved_hash"]
@@ -448,19 +469,9 @@ if not df_final_trabalho.empty:
                         s_nome, s_qtd = p.split(":")
                         s_nome = higienizar_status(s_nome)
                         s_qtd = int(s_qtd)
-                        if i == len(partes_validas) - 1: adjusted_qtd = total_alunos_row - distribuido
-                        else:
-                            adjusted_qtd = round((s_qtd / soma_interna) * total_alunos_row)
-                            distribuido += adjusted_qtd
-                        status_totals[s_nome] = status_totals.get(s_nome, 0) + adjusted_qtd
-                elif "," in st_val:
-                    partes = [higienizar_status(p) for p in st_val.split(",") if p.strip()]
-                    if not partes: partes = ["Não Informado"]
-                    val_base = total_alunos_row // len(partes)
-                    sobra = total_alunos_row % len(partes)
-                    for i, p in enumerate(partes):
-                        adjusted_qtd = val_base + (1 if i < sobra else 0)
-                        status_totals[p] = status_totals.get(p, 0) + adjusted_qtd
+                        add_q = total_alunos_row - distribuido if i == len(partes_validas) - 1 else round((s_qtd / soma_interna) * total_alunos_row)
+                        distribuido += add_q
+                        status_totals[s_nome] = status_totals.get(s_nome, 0) + add_q
                 else:
                     st_val = higienizar_status(st_val)
                     status_totals[st_val] = status_totals.get(st_val, 0) + total_alunos_row
@@ -472,7 +483,7 @@ if not df_final_trabalho.empty:
     # TABELA COM EDIÇÃO TOTALMENTE LIVRE
     # =========================
     st.divider()
-    st.subheader("📚 Ajuste de Planejamento e Cirurgia Manual")
+    st.subheader("📚 Grade de Planejamento Final")
     
     df_final_trabalho = df_final_trabalho.reset_index(drop=True)
     
@@ -517,7 +528,7 @@ if not df_final_trabalho.empty:
             threading.Thread(target=salvar_background, args=(dados_para_db, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])).start()
 
     # =========================
-    # ASSISTENTE DE REMANEJAMENTO AVANÇADO
+    # ASSISTENTE DE REMANEJAMENTO DE SEGURANÇA
     # =========================
     st.divider()
     col_l, col_r = st.columns([1, 1])
@@ -533,23 +544,21 @@ if not df_final_trabalho.empty:
             else: st.warning("CNPJ não encontrado.")
 
     with col_r:
-        st.subheader("🔄 Assistente de Remanejamento Manual")
+        st.subheader("⚠️ Monitor de Exceções Matemáticas")
         baixas = plano_editado[plano_editado["Alunos"] < min_alunos]
         
         if not baixas.empty:
-            st.warning(f"⚠️ **{len(baixas)} turma(s) cancelada(s) ou abaixo do quórum de {min_alunos}.** O sistema não encontrou uma matemática perfeita para alocar blocos de CNPJ inteiros. Ajuste usando o modo manual se desejar.")
-            
+            st.warning(f"Exceção encontrada: O total geral de alunos neste curso é insuficiente para fechar turmas dentro do mínimo de {min_alunos}.")
             for idx, turma_baixa in baixas.iterrows():
                 curso_b = turma_baixa["Curso"]
                 nome_b = turma_baixa["Turma"]
                 alunos_b = int(turma_baixa["Alunos"])
-                
                 candidatas = plano_editado[(plano_editado["Curso"] == curso_b) & (plano_editado["Turma"] != nome_b)]
                 
-                with st.expander(f"⚙️ Resolver Opcional: {nome_b} ({alunos_b} alunos)", expanded=False):
+                with st.expander(f"Resolver Opcional: {nome_b} ({alunos_b} alunos)", expanded=False):
                     if not candidatas.empty:
-                        opcao_acao = st.radio("Estratégia Forçada (Vai ignorar divisão de CNPJ):", 
-                                              ["1. Fundir com uma turma específica", "2. Distribuir igualitariamente entre as outras"], 
+                        opcao_acao = st.radio("Ação Corretiva Manual:", 
+                                              ["1. Fundir com uma turma específica (Ignorará o Limite Máximo)", "2. Distribuir igualitariamente"], 
                                               key=f"rad_{nome_b}")
                         
                         if opcao_acao.startswith("1"):
@@ -561,18 +570,17 @@ if not df_final_trabalho.empty:
                                 fundir_turmas(nome_b, nome_destino, curso_b, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
                                 st.session_state.dados_salvos = carregar_do_banco()
                                 st.rerun()
-                                
                         else:
                             qnt_turmas = len(candidatas)
-                            st.info(f"Os {alunos_b} alunos serão divididos entre as {qnt_turmas} outras turmas ativas de {curso_b}.")
+                            st.info(f"Os {alunos_b} alunos serão divididos entre as {qnt_turmas} outras turmas.")
                             if st.button("Aplicar Distribuição em Lote", key=f"btn_dist_{nome_b}", type="primary"):
                                 distribuir_turma(nome_b, curso_b, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
                                 st.session_state.dados_salvos = carregar_do_banco()
                                 st.rerun()
                     else:
-                        st.error("Nenhuma outra turma deste curso para receber alunos. Ajuste as informações na tabela ao lado manualmente.")
+                        st.error("Nenhuma outra turma deste curso para receber alunos.")
         else:
-            st.success("Todas as turmas estão saudáveis e dentro do quórum!")
+            st.success(f"Matemática Perfeita! 100% das turmas estão rigorosamente entre {min_alunos} e {max_alunos} alunos.")
 
     st.divider()
     st.download_button("📥 Baixar Excel Completo", data=gerar_excel_final(plano_editado, df_base_original), file_name="planejamento_senac.xlsx")
