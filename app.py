@@ -27,7 +27,13 @@ def gerar_modelo_excel():
 def gerar_excel_final(plano_df, original_df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        plano_df.to_excel(writer, sheet_name="Planejamento", index=False)
+        # Removemos as colunas de controle (id, Arquivo) antes de gerar o Excel
+        df_export = plano_df.copy()
+        for col in ["id", "Arquivo"]:
+            if col in df_export.columns:
+                df_export = df_export.drop(columns=[col])
+                
+        df_export.to_excel(writer, sheet_name="Planejamento", index=False)
         if not original_df.empty:
             original_df.to_excel(writer, sheet_name="Base_Original", index=False)
     return output.getvalue()
@@ -67,7 +73,7 @@ with st.sidebar:
             res_arq = sb_client.table("planejamentos_turmas").select("Arquivo").execute()
             if res_arq.data:
                 df_arq = pd.DataFrame(res_arq.data)
-                lista_arquivos = df_arq["Arquivo"].unique()
+                lista_arquivos = df_arq["Arquivo"].dropna().unique()
                 
                 for nome_arq in lista_arquivos:
                     col_txt, col_del = st.columns([3, 1])
@@ -77,9 +83,9 @@ with st.sidebar:
                         st.cache_resource.clear()
                         st.rerun()
             else:
-                st.info("Nenhum arquivo individual.")
+                st.info("Nenhum arquivo individual salvo.")
         except:
-            st.warning("Adicione a coluna 'Arquivo' no Supabase para gerenciar lotes.")
+            st.warning("Adicione a coluna 'Arquivo' no Supabase.")
 
         st.divider()
         if st.button("🚨 Resetar Tudo (Planejamento Zero)"):
@@ -199,7 +205,6 @@ if arquivo:
         df_raw = pd.read_excel(arquivo)
         df_base_original = df_raw.copy()
         
-        # --- REDE DE SEGURANÇA PARA NOMES DE COLUNAS ---
         colunas_originais = df_raw.columns.tolist()
         mapa_renomear = {}
         for col in colunas_originais:
@@ -235,9 +240,7 @@ if not df_final_trabalho.empty:
     st.divider()
     st.subheader("🏁 Painel de Controle - Visão Geral")
     
-    # Cálculos avançados de KPIs
     total_alunos = df_final_trabalho["Alunos"].sum()
-    # Conta quantos CNPJs existem ao todo (cada CNPJ é uma solicitação separada por vírgula)
     total_solicitacoes = sum(len(str(x).split(",")) for x in df_final_trabalho["CNPJs"] if str(x) != "nan")
     
     st.metric("Total Geral no Planejamento", f"{total_solicitacoes} Solicitações | {total_alunos} Alunos")
@@ -252,7 +255,6 @@ if not df_final_trabalho.empty:
 
     with c_met2:
         with st.expander("📋 Por Status da Solicitação", expanded=True):
-            # Conta alunos e solicitações individualmente por status
             status_counts = {}
             for _, row in df_final_trabalho.iterrows():
                 st_val = str(row["Status"])
@@ -264,20 +266,24 @@ if not df_final_trabalho.empty:
                 status_counts[st_val]["alunos"] += q_alunos
                 status_counts[st_val]["solicitacoes"] += q_solic
             
-            # Renderiza o total individual de cada status na tela
             for st_name, counts in status_counts.items():
                 st.write(f"**{st_name}:** {counts['solicitacoes']} solicitações ({counts['alunos']} alunos)")
 
     # =========================
-    # TABELA E AUTO-SAVE
+    # TABELA E AUTO-SAVE BLINDADO
     # =========================
     st.divider()
     st.subheader("📚 Ajuste de Planejamento")
     
     if "id" not in df_final_trabalho.columns:
         df_final_trabalho["id"] = None
+    if "Arquivo" not in df_final_trabalho.columns:
+        df_final_trabalho["Arquivo"] = "Desconhecido"
+    if "UFs" not in df_final_trabalho.columns:
+        df_final_trabalho["UFs"] = "N/A"
 
-    ordem_cols = ["id", "Turma", "Curso", "Alunos", "CNPJs", "Status"]
+    # Adicionamos UFs e Arquivo na ordem para que viajem escondidos na tabela
+    ordem_cols = ["id", "Turma", "Curso", "Alunos", "CNPJs", "Status", "Arquivo", "UFs"]
     ordem_ok = [c for c in ordem_cols if c in df_final_trabalho.columns]
     
     plano_editado = st.data_editor(
@@ -285,6 +291,8 @@ if not df_final_trabalho.empty:
         column_config={
             "id": None,
             "Status": None,
+            "Arquivo": None,
+            "UFs": None,
             "Turma": st.column_config.TextColumn("Turma (Editável)"),
             "CNPJs": st.column_config.TextColumn("CNPJs"),
         },
@@ -298,21 +306,19 @@ if not df_final_trabalho.empty:
         try:
             dados_para_db = []
             for row in plano_editado.to_dict(orient="records"):
-                original = df_final_trabalho.loc[df_final_trabalho['Turma'] == row['Turma']].iloc[0]
-                
+                # Agora lemos direto da linha editada, sem precisar procurar pelo nome da Turma (evita bugs se renomear!)
                 dados_para_db.append({
-                    "Curso": str(row["Curso"]), 
-                    "Turma": str(row["Turma"]), 
-                    "Alunos": int(row["Alunos"]),
-                    "UFs": str(original["UFs"]), 
-                    "CNPJs": str(row["CNPJs"]), 
-                    "Status": str(original["Status"]),
-                    "Arquivo": str(original["Arquivo"])
+                    "Curso": str(row.get("Curso", "")), 
+                    "Turma": str(row.get("Turma", "")), 
+                    "Alunos": int(row.get("Alunos", 0)),
+                    "UFs": str(row.get("UFs", "")), 
+                    "CNPJs": str(row.get("CNPJs", "")), 
+                    "Status": str(row.get("Status", "")),
+                    "Arquivo": str(row.get("Arquivo", ""))
                 })
             
             supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
             supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
-            st.toast("Sincronizado!", icon="☁️")
         except Exception as e:
             st.error(f"Erro ao salvar na nuvem: {e}")
 
