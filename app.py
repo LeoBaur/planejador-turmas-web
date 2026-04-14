@@ -38,7 +38,7 @@ def gerar_excel_final(plano_df, original_df):
     return output.getvalue()
 
 # =========================
-# SISTEMA DE LOGIN (Logout reposicionado e Enter ativado)
+# SISTEMA DE LOGIN 
 # =========================
 if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
@@ -91,7 +91,7 @@ with st.sidebar:
 
 if not st.session_state.autenticado:
     st.title("📊 Planejador Inteligente de Turmas")
-    st.info("👋 Olá! Faça login na barra lateral para acessar o sistema. Você pode digitar a senha e apertar Enter.")
+    st.info("👋 Olá! Faça login na barra lateral para acessar o sistema.")
     st.stop()
 
 # =========================
@@ -114,7 +114,7 @@ def carregar_do_banco():
     return pd.DataFrame()
 
 # =========================
-# MOTOR DE GERAÇÃO (Agora com Matemática Exata de Status)
+# MOTOR DE GERAÇÃO
 # =========================
 def gerar_turmas(df, min_a, max_a, plano_antigo=pd.DataFrame(), nome_arquivo="Upload"):
     turmas_lista = []
@@ -154,14 +154,12 @@ def gerar_turmas(df, min_a, max_a, plano_antigo=pd.DataFrame(), nome_arquivo="Up
             cnpjs = sorted(set([str(g["CNPJ"]) for g in grupo]))
             ufs = sorted(set([str(g["UF"]) for g in grupo]))
             
-            # --- NOVO: Contabilidade EXATA de alunos por status dentro da turma ---
             stats_counts = {}
             for g in grupo:
                 s = str(g["Status"])
                 if s != "nan" and s.strip() != "":
                     stats_counts[s] = stats_counts.get(s, 0) + 1
             
-            # Codifica a contagem para ser decodificada pelo KPI (Ex: "Ativo:20|Espera:10")
             stats_str_coded = "|".join([f"{k}:{v}" for k, v in stats_counts.items()])
             
             chave_busca = f"{cnpjs[0]}_{curso}"
@@ -179,7 +177,7 @@ def gerar_turmas(df, min_a, max_a, plano_antigo=pd.DataFrame(), nome_arquivo="Up
     return pd.DataFrame(turmas_lista)
 
 # =========================
-# INTERFACE PRINCIPAL
+# INTERFACE PRINCIPAL E UPLOAD
 # =========================
 st.title("📊 Planejador Inteligente de Turmas")
 
@@ -215,8 +213,25 @@ if arquivo:
         df_validos = df_raw[df_raw["Qtde"] > 0].copy()
 
         df_motor = df_validos.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
-        df_final_trabalho = gerar_turmas(df_motor, min_alunos, max_alunos, plano_nuvem, arquivo.name)
-        st.success(f"Arquivo '{arquivo.name}' sincronizado com a nuvem!")
+        df_novo_arquivo = gerar_turmas(df_motor, min_alunos, max_alunos, plano_nuvem, arquivo.name)
+        
+        # Salva imediatamente no banco adicionando aos existentes
+        if supabase:
+            supabase.table("planejamentos_turmas").delete().eq("Arquivo", arquivo.name).execute()
+            dados_para_db = []
+            for _, row in df_novo_arquivo.iterrows():
+                dados_para_db.append({
+                    "Curso": str(row["Curso"]), "Turma": str(row["Turma"]), "Alunos": int(row["Alunos"]),
+                    "UFs": str(row["UFs"]), "CNPJs": str(row["CNPJs"]), "Status": str(row["Status"]),
+                    "Arquivo": str(row["Arquivo"])
+                })
+            supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
+            
+        st.success(f"Arquivo '{arquivo.name}' adicionado ao planejamento com sucesso!")
+        
+        # Recarrega a união de todos os arquivos do banco
+        plano_nuvem = carregar_do_banco()
+        df_final_trabalho = plano_nuvem.copy()
         
     except Exception as e:
         st.error(f"Erro no processamento da planilha: {e}")
@@ -230,7 +245,7 @@ if not df_final_trabalho.empty and "Arquivo" in df_final_trabalho.columns:
     arquivos_salvos = df_final_trabalho["Arquivo"].dropna().unique()
     if len(arquivos_salvos) > 0:
         with st.expander("📂 Gerenciar Arquivos Consolidados no Banco", expanded=False):
-            st.caption("Abaixo estão as planilhas que já estão salvas na nuvem. Excluir aqui removerá os dados do banco definitivamente.")
+            st.caption("Planilhas unificadas na nuvem. Excluir uma planilha aqui removerá apenas os dados dela do planejamento total.")
             for arq in arquivos_salvos:
                 c1, c2 = st.columns([8, 1])
                 c1.write(f"📄 **{arq}**")
@@ -247,8 +262,6 @@ if not df_final_trabalho.empty:
     st.subheader("🏁 Painel de Controle - Visão Geral")
     
     total_alunos = df_final_trabalho["Alunos"].sum()
-    
-    # KPI Principal focado exclusivamente em alunos (Limpo e Direto)
     st.metric("Total Geral de Alunos no Planejamento", f"{total_alunos} alunos")
     
     c_met1, c_met2 = st.columns(2)
@@ -260,14 +273,11 @@ if not df_final_trabalho.empty:
                 st.write(f"**{r['Curso']}:** {r['Alunos']} alunos")
 
     with c_met2:
-        # NOVO: Alunos por Tipo de Solicitação (Matemática Desempacotada)
         with st.expander("📋 Alunos por Tipo de Solicitação", expanded=True):
             status_totals = {}
-            
             for _, row in df_final_trabalho.iterrows():
                 st_val = str(row["Status"])
                 if st_val and st_val != "nan":
-                    # Desempacota a string blindada (ex: "Em Atendimento:10|Aguardando:5")
                     if "|" in st_val or ":" in st_val:
                         partes = st_val.split("|")
                         for p in partes:
@@ -275,18 +285,19 @@ if not df_final_trabalho.empty:
                                 s_nome, s_qtd = p.split(":")
                                 status_totals[s_nome] = status_totals.get(s_nome, 0) + int(s_qtd)
                     else:
-                        # Fallback de segurança para planilhas antigas já salvas no banco
                         status_totals[st_val] = status_totals.get(st_val, 0) + int(row["Alunos"])
             
-            # Exibe a listagem limpa, individual e precisa
             for st_nome, count in status_totals.items():
                 st.write(f"**{st_nome}:** {count} alunos")
 
     # =========================
-    # TABELA E AUTO-SAVE
+    # TABELA E SMART-SAVE (Fluidez garantida)
     # =========================
     st.divider()
     st.subheader("📚 Ajuste de Planejamento")
+    
+    # Previne erros de indexação forçando uma limpeza limpa do df base
+    df_final_trabalho = df_final_trabalho.reset_index(drop=True)
     
     if "id" not in df_final_trabalho.columns: df_final_trabalho["id"] = None
     if "Arquivo" not in df_final_trabalho.columns: df_final_trabalho["Arquivo"] = "Desconhecido"
@@ -311,23 +322,39 @@ if not df_final_trabalho.empty:
         key="editor_principal"
     )
 
-    if supabase and (arquivo is not None or not plano_nuvem.empty):
-        try:
-            dados_para_db = []
-            for row in plano_editado.to_dict(orient="records"):
-                dados_para_db.append({
-                    "Curso": str(row.get("Curso", "")), 
-                    "Turma": str(row.get("Turma", "")), 
-                    "Alunos": int(row.get("Alunos", 0)),
-                    "UFs": str(row.get("UFs", "")), 
-                    "CNPJs": str(row.get("CNPJs", "")), 
-                    "Status": str(row.get("Status", "")),
-                    "Arquivo": str(row.get("Arquivo", ""))
-                })
-            
-            supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
-            supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
-        except: pass
+    # Lógica de Salvamento Inteligente (Sem travamentos)
+    houve_mudanca = False
+    df_comp_old = df_final_trabalho[ordem_ok].fillna("").astype(str).to_dict("records")
+    df_comp_new = plano_editado.fillna("").astype(str).to_dict("records")
+    
+    if df_comp_old != df_comp_new:
+        houve_mudanca = True
+
+    if houve_mudanca:
+        st.warning("⚠️ Você alterou dados na tabela. Confirme para aplicar na nuvem.")
+        if st.button("💾 Salvar Alterações na Nuvem", type="primary", use_container_width=True):
+            if supabase:
+                try:
+                    dados_para_db = []
+                    # Varre a tabela usando o index para não perder a referência caso o nome da Turma mude
+                    for index, row in plano_editado.iterrows():
+                        original = df_final_trabalho.iloc[index]
+                        dados_para_db.append({
+                            "Curso": str(row.get("Curso", "")), 
+                            "Turma": str(row.get("Turma", "")), 
+                            "Alunos": int(row.get("Alunos", 0)),
+                            "UFs": str(original["UFs"]), 
+                            "CNPJs": str(row.get("CNPJs", "")), 
+                            "Status": str(original["Status"]),
+                            "Arquivo": str(original["Arquivo"])
+                        })
+                    
+                    supabase.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
+                    supabase.table("planejamentos_turmas").insert(dados_para_db).execute()
+                    st.toast("Sucesso! Planejamento salvo na nuvem.", icon="✅")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar: {e}")
 
     # =========================
     # BUSCA, ALERTAS E GRÁFICOS
