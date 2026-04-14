@@ -628,60 +628,78 @@ if not df_final_trabalho.empty:
                 st.session_state.turmas_ignoradas = []
                 st.rerun()
 
-    # =========================
-    # RELATÓRIO DE CNPJS (PENDÊNCIAS E VAGAS)
+  # =========================
+    # RELATÓRIO DE CNPJs (AGUARDANDO ATENDIMENTO)
     # =========================
     st.divider()
-    st.subheader("📄 Relatório de CNPJs (Saldos e Pendências)")
-    st.write("Consolidação automática de todos os clientes, mostrando o total de vagas, as UFs de atuação e em quais turmas estão alocados atualmente.")
-    
+    st.subheader("📄 Relatório de CNPJs (Aguardando atendimento)")
+    st.write("CNPJs e quantidades de alunos com status 'Aguardando Atendimento', detalhados por UF.")
+
     if not plano_editado.empty:
-        relatorio_dados = {}
-        for index, row in plano_editado.iterrows():
-            curso = row.get("Curso", "")
-            turma = row.get("Turma", "")
-            ufs = row.get("UFs", "")
-            cnpjs_parsed = parse_cnpjs(row.get("CNPJs", ""))
-            
-            for cnpj, qtde in cnpjs_parsed.items():
-                if cnpj not in relatorio_dados:
-                    relatorio_dados[cnpj] = {"CNPJ": cnpj, "Vagas Totais": 0, "UFs": set(), "Turmas Alocadas": []}
+        status_alvo = "Aguardando Atendimento"
+        lista_pendencias = []
+
+        # Percorremos os dados para filtrar apenas o status desejado
+        for index, row in df_final_trabalho.iterrows():
+            status_raw = str(row.get("Status", ""))
+            qtd_aguardando_linha = 0
+
+            # Extrai a quantidade exata do status alvo na linha
+            for p in status_raw.split("|"):
+                if ":" in p:
+                    label, valor = p.split(":")
+                    if higienizar_status(label) == status_alvo:
+                        qtd_aguardando_linha = int(valor)
+
+            # Se houver alguém aguardando atendimento nesta linha
+            if qtd_aguardando_linha > 0:
+                cnpjs_na_linha = parse_cnpjs(row.get("CNPJs", ""))
+                total_alunos_linha = sum(cnpjs_na_linha.values())
                 
-                relatorio_dados[cnpj]["Vagas Totais"] += qtde
-                for uf in str(ufs).split(","):
-                    if uf.strip() and uf.strip() != "nan" and uf.strip() != "Não Informado":
-                        relatorio_dados[cnpj]["UFs"].add(uf.strip())
+                # Proporção: qual % da turma está aguardando?
+                fator_pendencia = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
                 
-                # Só adiciona no detalhamento se tiver mais de 0 alunos daquele CNPJ na turma
-                if qtde > 0:
-                    relatorio_dados[cnpj]["Turmas Alocadas"].append(f"{turma} ({qtde} vagas)")
-                
-        linhas_df = []
-        for cnpj, dados in relatorio_dados.items():
-            linhas_df.append({
-                "CNPJ": dados["CNPJ"],
-                "UF": ", ".join(sorted(dados["UFs"])) if dados["UFs"] else "Não Informada",
-                "Vagas Totais": dados["Vagas Totais"],
-                "Detalhamento (Turmas)": " | ".join(dados["Turmas Alocadas"])
-            })
-            
-        df_relatorio = pd.DataFrame(linhas_df).sort_values(by="Vagas Totais", ascending=False).reset_index(drop=True)
-        
-        with st.expander("📊 Ver Relatório Consolidado", expanded=False):
-            st.dataframe(df_relatorio, use_container_width=True)
-            
-            def gerar_excel_relatorio(df):
+                # UF principal da linha
+                uf_principal = str(row.get("UFs", "Não Informada")).split(",")[0].strip()
+
+                for cnpj, qtd_cnpj in cnpjs_na_linha.items():
+                    pendencia_calculada = round(qtd_cnpj * fator_pendencia)
+                    if pendencia_calculada > 0:
+                        lista_pendencias.append({
+                            "UF": uf_principal,
+                            "CNPJ": cnpj,
+                            "Qtd Aguardando": pendencia_calculada
+                        })
+
+        if lista_pendencias:
+            # Geramos os dois DataFrames para o relatório
+            df_detalhe = pd.DataFrame(lista_pendencias).groupby(["UF", "CNPJ"], as_index=False)["Qtd Aguardando"].sum()
+            df_total_uf = df_detalhe.groupby("UF")["Qtd Aguardando"].sum().reset_index()
+            df_total_uf.columns = ["UF", "Total de Vagas Aguardando"]
+
+            # Exibição na Tela
+            st.write("**Total de Vagas Aguardando Atendimento por UF:**")
+            st.table(df_total_uf)
+
+            st.write("**Detalhamento por Cliente (CNPJ):**")
+            st.dataframe(df_detalhe.sort_values(by=["UF", "Qtd Aguardando"], ascending=[True, False]), use_container_width=True, hide_index=True)
+
+            # Função para gerar Excel com duas abas
+            def gerar_excel_pendencias(df_d, df_t):
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                    df.to_excel(writer, index=False, sheet_name="Relatório_CNPJs")
+                    df_t.to_excel(writer, index=False, sheet_name="Resumo_por_UF")
+                    df_d.to_excel(writer, index=False, sheet_name="Detalhe_por_CNPJ")
                 return output.getvalue()
-                
+
             st.download_button(
-                label="📥 Baixar Relatório de CNPJs (Excel)",
-                data=gerar_excel_relatorio(df_relatorio),
-                file_name="relatorio_cnpjs_pendencias.xlsx",
+                label="📥 Baixar Relatório (Excel)",
+                data=gerar_excel_pendencias(df_detalhe, df_total_uf),
+                file_name="relatorio_aguardando_atendimento.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+        else:
+            st.info("Nenhuma pendência encontrada com o status 'Aguardando Atendimento'.")
 
     st.divider()
     st.download_button("📥 Baixar Planilha Principal (Excel Completo)", data=gerar_excel_final(plano_editado, df_base_original), file_name="planejamento_senac.xlsx")
