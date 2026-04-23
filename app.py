@@ -3,6 +3,7 @@ import pandas as pd
 import math
 import threading
 import re
+import time
 from io import BytesIO
 from supabase import create_client, Client
 
@@ -140,7 +141,19 @@ def distribuir_turma(nome_origem, curso, url, key):
 # =========================
 # LOGIN E BANCO DE DADOS
 # =========================
-if 'autenticado' not in st.session_state: st.session_state.autenticado = False
+if 'autenticado' not in st.session_state: 
+    st.session_state.autenticado = False
+
+# Verificação de persistência de login (2 horas = 7200 segundos)
+if not st.session_state.autenticado and "login_time" in st.query_params:
+    try:
+        if time.time() - float(st.query_params["login_time"]) < 7200:
+            st.session_state.autenticado = True
+        else:
+            del st.query_params["login_time"]
+    except:
+        pass
+
 if 'turmas_ignoradas' not in st.session_state: st.session_state.turmas_ignoradas = []
 if 'mapa_cnpj_uf' not in st.session_state: st.session_state.mapa_cnpj_uf = {}
 
@@ -150,10 +163,15 @@ with st.sidebar:
             u, s = st.text_input("Usuário"), st.text_input("Senha", type="password")
             if st.form_submit_button("Entrar") and u == "admin" and s == "senac123":
                 st.session_state.autenticado = True
+                st.query_params["login_time"] = str(time.time())
                 st.rerun()
     else:
         st.success("👤 Logado como Admin")
-        if st.button("🚪 Sair"): st.session_state.autenticado = False; st.rerun()
+        if st.button("🚪 Sair"): 
+            st.session_state.autenticado = False
+            if "login_time" in st.query_params:
+                del st.query_params["login_time"]
+            st.rerun()
         st.divider()
         min_alunos = st.number_input("Mínimo", min_value=1, value=25)
         max_alunos = st.number_input("Máximo", min_value=1, value=45)
@@ -179,20 +197,16 @@ def carregar_do_banco():
 
 if "dados_salvos" not in st.session_state:
     st.session_state.dados_salvos = carregar_do_banco()
-
-# =========================
-# HEURÍSTICA DE APRENDIZADO DE UFs
-# =========================
-df_final_trabalho_pre = st.session_state.dados_salvos.copy()
-
-if not df_final_trabalho_pre.empty:
-    for _, row_db in df_final_trabalho_pre.iterrows():
-        ufs_banco = [u.strip() for u in str(row_db.get("UFs", "")).split(",") if u.strip() and u.strip() != "nan"]
-        cnpjs_banco = parse_cnpjs(str(row_db.get("CNPJs", "")))
-        
-        if len(ufs_banco) == 1:
-            for c_key in cnpjs_banco.keys():
-                st.session_state.mapa_cnpj_uf[clean_key(c_key)] = ufs_banco[0]
+    # Popula o mapa de UFs a partir do banco para reconhecer mesmo sem subir arquivo
+    if not st.session_state.dados_salvos.empty:
+        for _, row_db in st.session_state.dados_salvos.iterrows():
+            ufs_banco = [u.strip() for u in str(row_db.get("UFs", "")).split(",") if u.strip() and u.strip() != "nan"]
+            cnpjs_banco = parse_cnpjs(str(row_db.get("CNPJs", "")))
+            if len(ufs_banco) == 1:
+                for c_key in cnpjs_banco.keys():
+                    c_clean = str(c_key).strip()
+                    if c_clean.endswith(".0"): c_clean = c_clean[:-2]
+                    st.session_state.mapa_cnpj_uf[c_clean] = ufs_banco[0]
 
 # =========================
 # INTERFACE E PROCESSAMENTO
@@ -349,7 +363,9 @@ if not df_final_trabalho.empty:
             
             novas_ufs_detectadas = []
             for c in dados_cnpj.keys():
-                uf_ref = st.session_state.mapa_cnpj_uf.get(clean_key(c))
+                c_clean = str(c).strip()
+                if c_clean.endswith(".0"): c_clean = c_clean[:-2]
+                uf_ref = st.session_state.mapa_cnpj_uf.get(c_clean)
                 if uf_ref:
                     for u in str(uf_ref).split(","):
                         if u.strip() and u.strip() != "nan":
@@ -365,7 +381,6 @@ if not df_final_trabalho.empty:
                 "Status": orig["Status"], "Arquivo": orig["Arquivo"]
             })
             
-        # AJUSTE 2: Salvamento direto (síncrono) para não falhar ao fechar a janela rápido
         salvar_background(db_data, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
         st.session_state.dados_salvos = pd.DataFrame(db_data)
         st.rerun()
