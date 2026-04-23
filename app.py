@@ -395,7 +395,10 @@ if not df_final_trabalho.empty:
         busca = st.text_input("CNPJ:")
         if busca:
             res = plano_editado[plano_editado["CNPJs"].astype(str).str.contains(busca)]
-            st.dataframe(res[["Curso", "Turma", "UFs"]], hide_index=True) if not res.empty else st.warning("Não encontrado")
+            if not res.empty:
+                st.dataframe(res[["Curso", "Turma", "UFs"]], hide_index=True)
+            else:
+                st.warning("Não encontrado")
     with col_r:
         st.subheader("🔄 Assistente de Remanejamento")
         baixas = plano_editado[plano_editado["Alunos"] < min_alunos]
