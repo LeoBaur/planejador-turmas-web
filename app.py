@@ -49,6 +49,13 @@ def salvar_background(dados_dict, url, key):
     except Exception:
         pass
 
+# Função para garantir que os CNPJs sejam comparados de forma exata (sem .0 ou espaços)
+def clean_key(k):
+    s = str(k).strip().upper()
+    if s.endswith(".0"): 
+        s = s[:-2]
+    return s
+
 # =========================
 # LÓGICA DE STRINGS E PARSERS
 # =========================
@@ -174,25 +181,46 @@ if "dados_salvos" not in st.session_state:
     st.session_state.dados_salvos = carregar_do_banco()
 
 # =========================
+# HEURÍSTICA DE APRENDIZADO DE UFs
+# =========================
+df_final_trabalho = st.session_state.dados_salvos.copy()
+
+# Varre os dados já salvos: se uma turma possui apenas UMA UF,
+# sabemos que todos os CNPJs dela são daquela UF. Isso reconstrói o mapa de forma autônoma.
+if not df_final_trabalho.empty:
+    for _, row_db in df_final_trabalho.iterrows():
+        ufs_banco = [u.strip() for u in str(row_db.get("UFs", "")).split(",") if u.strip() and u.strip() != "nan"]
+        cnpjs_banco = parse_cnpjs(str(row_db.get("CNPJs", "")))
+        
+        if len(ufs_banco) == 1:
+            for c_key in cnpjs_banco.keys():
+                st.session_state.mapa_cnpj_uf[clean_key(c_key)] = ufs_banco[0]
+
+# =========================
 # INTERFACE E PROCESSAMENTO
 # =========================
 st.title("📊 Planejador Inteligente de Turmas")
-df_final_trabalho = st.session_state.dados_salvos.copy()
 df_base_original = pd.DataFrame()
 arquivo = st.file_uploader("📤 Porta de Entrada", type=["xlsx"])
 
 if arquivo:
     if st.button("🚀 Processar e Salvar", type="primary"):
         try:
-            df_raw = pd.read_excel(arquivo)
+            # Lê forçando string para evitar que CNPJs numéricos virem "1.11e13" ou adicionem ".0"
+            df_raw = pd.read_excel(arquivo, dtype=str) 
             df_base_original = df_raw.copy()
             mapa = {c: "UF" if str(c).upper() in ["UF", "ESTADO"] else "CNPJ" if str(c).upper() in ["CNPJ", "CLIENTE"] else "Qtde" if str(c).upper() in ["QTDE", "QUANTIDADE", "ALUNOS"] else "Status" if str(c).upper() in ["STATUS", "SITUACAO", "SITUAÇÃO"] else "Curso" if str(c).upper() in ["CURSO", "NOME DO CURSO"] else c for c in df_raw.columns}
             df_raw = df_raw.rename(columns=mapa)
             
-            # Alimentar o mapa de referência CNPJ -> UF
+            # Como forçamos dtype=str, precisamos garantir que 'Qtde' volte a ser número para a matemática não falhar
+            if "Qtde" in df_raw.columns:
+                df_raw["Qtde"] = pd.to_numeric(df_raw["Qtde"], errors='coerce').fillna(0).astype(int)
+            
+            # Alimentar o mapa de referência de forma cravada
             for _, r in df_raw.iterrows():
-                c_limpo = str(r.get("CNPJ", "")).strip()
-                if c_limpo: st.session_state.mapa_cnpj_uf[c_limpo] = str(r.get("UF", ""))
+                c_limpo = clean_key(r.get("CNPJ", ""))
+                if c_limpo and c_limpo != "NAN": 
+                    st.session_state.mapa_cnpj_uf[c_limpo] = str(r.get("UF", "")).strip()
 
             df_motor = df_raw.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
             turmas_estado = df_final_trabalho.to_dict('records') if not df_final_trabalho.empty else []
@@ -296,13 +324,12 @@ if not df_final_trabalho.empty:
         use_container_width=True, hide_index=True, key="editor_principal"
     )
 
-    # Botão de download da planilha principal (conforme solicitado: logo abaixo da planilha)
     st.download_button("📥 Baixar Planilha Principal (Excel Completo)", 
                        data=gerar_excel_final(plano_editado, df_base_original), 
                        file_name="planejamento_senac.xlsx")
 
     # =========================
-    # SALVAMENTO AUTOMÁTICO E RECALCULO
+    # SALVAMENTO AUTOMÁTICO E RECALCULO UFs/ALUNOS
     # =========================
     dict_editado = plano_editado.to_dict("records")
     current_hash = hash(str(dict_editado))
@@ -316,26 +343,24 @@ if not df_final_trabalho.empty:
         for i, row in plano_editado.iterrows():
             orig = df_final_trabalho.iloc[i]
             
-            # --- NOVA LÓGICA DE ATUALIZAÇÃO AUTOMÁTICA ---
             dados_cnpj = parse_cnpjs(str(row["CNPJs"]))
             novo_total_alunos = sum(dados_cnpj.values())
             
             novas_ufs_detectadas = []
             for c in dados_cnpj.keys():
-                uf_encontrada = st.session_state.mapa_cnpj_uf.get(str(c).strip())
-                if uf_encontrada:
-                    novas_ufs_detectadas.append(uf_encontrada)
+                uf_ref = st.session_state.mapa_cnpj_uf.get(clean_key(c))
+                if uf_ref:
+                    # Garantindo que se vier "PR, SP" seja tratado de forma limpa
+                    for u in str(uf_ref).split(","):
+                        if u.strip() and u.strip() != "nan":
+                            novas_ufs_detectadas.append(u.strip())
             
-            if novas_ufs_detectadas:
-                lista_ufs = ", ".join(sorted(set(novas_ufs_detectadas)))
-            else:
-                lista_ufs = row["UFs"]
-            # --------------------------------------------
+            nova_uf_str = ", ".join(sorted(set(novas_ufs_detectadas))) if novas_ufs_detectadas else orig["UFs"]
             
             db_data.append({
                 "Curso": row["Curso"], "Turma": row["Turma"], 
                 "Alunos": int(novo_total_alunos),
-                "UFs": lista_ufs, 
+                "UFs": nova_uf_str, 
                 "CNPJs": row["CNPJs"], 
                 "Status": orig["Status"], "Arquivo": orig["Arquivo"]
             })
@@ -366,77 +391,4 @@ if not df_final_trabalho.empty:
                     if acao == "Fundir":
                         cands = plano_editado[(plano_editado["Curso"] == t_b["Curso"]) & (plano_editado["Turma"] != t_b["Turma"])]
                         dest = st.selectbox("Destino:", cands["Turma"], key=f"dest_{t_b['Turma']}")
-                        if st.button("Confirmar Fusão", key=f"btn_f_{t_b['Turma']}"):
-                            fundir_turmas(t_b["Turma"], dest, t_b["Curso"], st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-                            st.session_state.dados_salvos = carregar_do_banco(); st.rerun()
-                    elif acao == "Distribuir":
-                        if st.button("Confirmar Distribuição", key=f"btn_d_{t_b['Turma']}"):
-                            distribuir_turma(t_b["Turma"], t_b["Curso"], st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-                            st.session_state.dados_salvos = carregar_do_banco(); st.rerun()
-                    else:
-                        if st.button("Ocultar Alerta", key=f"btn_i_{t_b['Turma']}"):
-                            st.session_state.turmas_ignoradas.append(t_b["Turma"]); st.rerun()
-        else: st.success("Tudo em conformidade!")
-
-    # =========================
-    # RELATÓRIO: AGUARDANDO ATENDIMENTO (RESUMO + DETALHE NO EXCEL)
-    # =========================
-    st.divider()
-    with st.expander("📄 Relatório de CNPJs (Aguardando atendimento)", expanded=True):
-        st.write("CNPJs e quantidades de alunos com status 'Aguardando Atendimento', detalhados por UF.")
-
-        if not df_final_trabalho.empty:
-            status_alvo = "Aguardando Atendimento"
-            lista_pendencias = []
-
-            for index, row in df_final_trabalho.iterrows():
-                status_raw, qtd_aguardando_linha = str(row.get("Status", "")), 0
-                for p in status_raw.split("|"):
-                    if ":" in p:
-                        label, valor = p.split(":")
-                        if higienizar_status(label) == status_alvo:
-                            qtd_aguardando_linha = int(valor)
-
-                if qtd_aguardando_linha > 0:
-                    cnpjs_na_linha = parse_cnpjs(row.get("CNPJs", ""))
-                    total_alunos_linha = sum(cnpjs_na_linha.values())
-                    fator = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
-                    uf_linha = str(row.get("UFs", "N/A")).split(",")[0].strip()
-
-                    for cnpj, qtd_cnpj in cnpjs_na_linha.items():
-                        pendencia_calculada = round(qtd_cnpj * fator)
-                        if pendencia_calculada > 0:
-                            lista_pendencias.append({"UF": uf_linha, "CNPJ": cnpj, "Qtd": pendencia_calculada})
-
-            if lista_pendencias:
-                # 1. Gerar DataFrames
-                df_detalhe = pd.DataFrame(lista_pendencias).groupby(["UF", "CNPJ"], as_index=False)["Qtd"].sum()
-                df_total_uf = df_detalhe.groupby("UF")["Qtd"].sum().reset_index()
-                df_total_uf.columns = ["UF", "Total Aguardando"]
-
-                # 2. Exibição Visual (Estilo Resumo por Curso)
-                st.write("**Total de Vagas por UF:**")
-                for _, row_uf in df_total_uf.iterrows():
-                    st.write(f"📍 **{row_uf['UF']}:** {int(row_uf['Total Aguardando'])} vagas")
-                
-                st.divider()
-                st.write("**Detalhamento por Cliente:**")
-                st.dataframe(df_detalhe.sort_values(by=["UF", "Qtd"], ascending=[True, False]), 
-                             use_container_width=True, hide_index=True)
-
-                # 3. Função de Download (Gera um Excel com 2 abas)
-                def gerar_excel_pendencias_completo(df_d, df_t):
-                    output = BytesIO()
-                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                        df_t.to_excel(writer, index=False, sheet_name="Resumo_por_UF")
-                        df_d.to_excel(writer, index=False, sheet_name="Detalhe_por_CNPJ")
-                    return output.getvalue()
-
-                st.download_button(
-                    label="📥 Baixar Relatório Completo (Resumo + Detalhe)",
-                    data=gerar_excel_pendencias_completo(df_detalhe, df_total_uf),
-                    file_name="relatorio_aguardando_atendimento.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.info("Nenhuma pendência encontrada.")
+                        if st.button("Confirmar Fusão", key=f"btn_
