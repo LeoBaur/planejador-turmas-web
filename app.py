@@ -49,6 +49,13 @@ def salvar_background(dados_dict, url, key):
     except Exception:
         pass
 
+# Função para garantir que os CNPJs sejam comparados de forma exata (sem .0 ou espaços)
+def clean_key(k):
+    s = str(k).strip().upper()
+    if s.endswith(".0"): 
+        s = s[:-2]
+    return s
+
 # =========================
 # LÓGICA DE STRINGS E PARSERS
 # =========================
@@ -172,41 +179,50 @@ def carregar_do_banco():
 
 if "dados_salvos" not in st.session_state:
     st.session_state.dados_salvos = carregar_do_banco()
-    # Popula o mapa de UFs a partir do banco para reconhecer mesmo sem subir arquivo
-    if not st.session_state.dados_salvos.empty:
-        for _, row_db in st.session_state.dados_salvos.iterrows():
-            ufs_banco = [u.strip() for u in str(row_db.get("UFs", "")).split(",") if u.strip() and u.strip() != "nan"]
-            cnpjs_banco = parse_cnpjs(str(row_db.get("CNPJs", "")))
-            if len(ufs_banco) == 1:
-                for c_key in cnpjs_banco.keys():
-                    c_clean = str(c_key).strip()
-                    if c_clean.endswith(".0"): c_clean = c_clean[:-2]
-                    st.session_state.mapa_cnpj_uf[c_clean] = ufs_banco[0]
+
+# =========================
+# HEURÍSTICA DE APRENDIZADO DE UFs
+# =========================
+df_final_trabalho_pre = st.session_state.dados_salvos.copy()
+
+if not df_final_trabalho_pre.empty:
+    for _, row_db in df_final_trabalho_pre.iterrows():
+        ufs_banco = [u.strip() for u in str(row_db.get("UFs", "")).split(",") if u.strip() and u.strip() != "nan"]
+        cnpjs_banco = parse_cnpjs(str(row_db.get("CNPJs", "")))
+        
+        if len(ufs_banco) == 1:
+            for c_key in cnpjs_banco.keys():
+                st.session_state.mapa_cnpj_uf[clean_key(c_key)] = ufs_banco[0]
 
 # =========================
 # INTERFACE E PROCESSAMENTO
 # =========================
 st.title("📊 Planejador Inteligente de Turmas")
 df_final_trabalho = st.session_state.dados_salvos.copy()
+
+# AJUSTE 1: Fixando a ordem da planilha para evitar pulos quando a página recarregar
+if not df_final_trabalho.empty:
+    df_final_trabalho = df_final_trabalho.sort_values(by=["Curso", "Turma"]).reset_index(drop=True)
+
 df_base_original = pd.DataFrame()
 arquivo = st.file_uploader("📤 Porta de Entrada", type=["xlsx"])
 
 if arquivo:
     if st.button("🚀 Processar e Salvar", type="primary"):
         try:
-            df_raw = pd.read_excel(arquivo)
+            df_raw = pd.read_excel(arquivo, dtype=str) 
             df_base_original = df_raw.copy()
             mapa = {c: "UF" if str(c).upper() in ["UF", "ESTADO"] else "CNPJ" if str(c).upper() in ["CNPJ", "CLIENTE"] else "Qtde" if str(c).upper() in ["QTDE", "QUANTIDADE", "ALUNOS"] else "Status" if str(c).upper() in ["STATUS", "SITUACAO", "SITUAÇÃO"] else "Curso" if str(c).upper() in ["CURSO", "NOME DO CURSO"] else c for c in df_raw.columns}
             df_raw = df_raw.rename(columns=mapa)
             
-            # --- ALIMENTA O MAPA DE CNPJ -> UF COM OS DADOS DO ARQUIVO ---
-            for _, r in df_raw.iterrows():
-                c_str = str(r.get("CNPJ", "")).strip()
-                if c_str.endswith(".0"): c_str = c_str[:-2]
-                if c_str and c_str != "nan" and c_str != "NAN":
-                    st.session_state.mapa_cnpj_uf[c_str] = str(r.get("UF", "")).strip()
-            # -------------------------------------------------------------
+            if "Qtde" in df_raw.columns:
+                df_raw["Qtde"] = pd.to_numeric(df_raw["Qtde"], errors='coerce').fillna(0).astype(int)
             
+            for _, r in df_raw.iterrows():
+                c_limpo = clean_key(r.get("CNPJ", ""))
+                if c_limpo and c_limpo != "NAN": 
+                    st.session_state.mapa_cnpj_uf[c_limpo] = str(r.get("UF", "")).strip()
+
             df_motor = df_raw.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
             turmas_estado = df_final_trabalho.to_dict('records') if not df_final_trabalho.empty else []
             
@@ -302,52 +318,55 @@ if not df_final_trabalho.empty:
         df_final_trabalho[colunas_ok],
         column_config={
             "Curso": st.column_config.TextColumn("Curso", disabled=True),
+            "Alunos": st.column_config.NumberColumn("Alunos", disabled=True),
             "CNPJs": st.column_config.TextColumn("CNPJs", width=1000),
-            "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium")
+            "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium", disabled=True)
         },
         use_container_width=True, hide_index=True, key="editor_principal"
     )
 
-    # Botão de download da planilha principal
     st.download_button("📥 Baixar Planilha Principal (Excel Completo)", 
                        data=gerar_excel_final(plano_editado, df_base_original), 
                        file_name="planejamento_senac.xlsx")
 
-    # Salvamento Automático com Re-Cálculo
+    # =========================
+    # SALVAMENTO AUTOMÁTICO E RECALCULO UFs/ALUNOS
+    # =========================
     dict_editado = plano_editado.to_dict("records")
     current_hash = hash(str(dict_editado))
-    if "last_saved_hash" not in st.session_state: st.session_state.last_saved_hash = current_hash
+    
+    if "last_saved_hash" not in st.session_state: 
+        st.session_state.last_saved_hash = current_hash
+        
     if current_hash != st.session_state.last_saved_hash:
         st.session_state.last_saved_hash = current_hash
         db_data = []
         for i, row in plano_editado.iterrows():
             orig = df_final_trabalho.iloc[i]
             
-            # --- INÍCIO DA ATUALIZAÇÃO AUTOMÁTICA ---
             dados_cnpj = parse_cnpjs(str(row["CNPJs"]))
             novo_total_alunos = sum(dados_cnpj.values())
             
             novas_ufs_detectadas = []
             for c in dados_cnpj.keys():
-                c_clean = str(c).strip()
-                if c_clean.endswith(".0"): c_clean = c_clean[:-2]
-                uf_ref = st.session_state.mapa_cnpj_uf.get(c_clean)
+                uf_ref = st.session_state.mapa_cnpj_uf.get(clean_key(c))
                 if uf_ref:
                     for u in str(uf_ref).split(","):
                         if u.strip() and u.strip() != "nan":
                             novas_ufs_detectadas.append(u.strip())
             
-            if novas_ufs_detectadas:
-                lista_ufs = ", ".join(sorted(set(novas_ufs_detectadas)))
-            else:
-                lista_ufs = row["UFs"]
-            # --- FIM DA ATUALIZAÇÃO AUTOMÁTICA ---
-
+            nova_uf_str = ", ".join(sorted(set(novas_ufs_detectadas))) if novas_ufs_detectadas else orig["UFs"]
+            
             db_data.append({
-                "Curso": row["Curso"], "Turma": row["Turma"], "Alunos": int(novo_total_alunos),
-                "UFs": lista_ufs, "CNPJs": row["CNPJs"], "Status": orig["Status"], "Arquivo": orig["Arquivo"]
+                "Curso": row["Curso"], "Turma": row["Turma"], 
+                "Alunos": int(novo_total_alunos),
+                "UFs": nova_uf_str, 
+                "CNPJs": row["CNPJs"], 
+                "Status": orig["Status"], "Arquivo": orig["Arquivo"]
             })
-        threading.Thread(target=salvar_background, args=(db_data, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])).start()
+            
+        # AJUSTE 2: Salvamento direto (síncrono) para não falhar ao fechar a janela rápido
+        salvar_background(db_data, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
         st.session_state.dados_salvos = pd.DataFrame(db_data)
         st.rerun()
 
@@ -386,7 +405,7 @@ if not df_final_trabalho.empty:
         else: st.success("Tudo em conformidade!")
 
     # =========================
-    # RELATÓRIO: AGUARDANDO ATENDIMENTO (RESUMO + DETALHE NO EXCEL)
+    # RELATÓRIO: AGUARDANDO ATENDIMENTO
     # =========================
     st.divider()
     with st.expander("📄 Relatório de CNPJs (Aguardando atendimento)", expanded=True):
@@ -416,12 +435,10 @@ if not df_final_trabalho.empty:
                             lista_pendencias.append({"UF": uf_linha, "CNPJ": cnpj, "Qtd": pendencia_calculada})
 
             if lista_pendencias:
-                # 1. Gerar DataFrames
                 df_detalhe = pd.DataFrame(lista_pendencias).groupby(["UF", "CNPJ"], as_index=False)["Qtd"].sum()
                 df_total_uf = df_detalhe.groupby("UF")["Qtd"].sum().reset_index()
                 df_total_uf.columns = ["UF", "Total Aguardando"]
 
-                # 2. Exibição Visual (Estilo Resumo por Curso)
                 st.write("**Total de Vagas por UF:**")
                 for _, row_uf in df_total_uf.iterrows():
                     st.write(f"📍 **{row_uf['UF']}:** {int(row_uf['Total Aguardando'])} vagas")
@@ -431,7 +448,6 @@ if not df_final_trabalho.empty:
                 st.dataframe(df_detalhe.sort_values(by=["UF", "Qtd"], ascending=[True, False]), 
                              use_container_width=True, hide_index=True)
 
-                # 3. Função de Download (Gera um Excel com 2 abas)
                 def gerar_excel_pendencias_completo(df_d, df_t):
                     output = BytesIO()
                     with pd.ExcelWriter(output, engine="openpyxl") as writer:
