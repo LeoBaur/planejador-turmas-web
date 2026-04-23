@@ -104,7 +104,7 @@ def fundir_turmas(nome_origem, nome_destino, curso, url, key):
         novo_status = "|".join([f"{k}:{v}" for k, v in stats_dict.items()])
         
         client.table("planejamentos_turmas").update({
-            "Alunos": novos_alunos, "CNPJs": novos_cnpjs, "UFs": novos_ufs,
+            "Alunos": novos_alunos, "CNPJs": novos_cnpjs, "UFs": novas_ufs,
             "Arquivo": novos_arqs, "Status": novo_status
         }).eq("id", destino["id"]).execute()
         client.table("planejamentos_turmas").delete().eq("id", origem["id"]).execute()
@@ -135,6 +135,7 @@ def distribuir_turma(nome_origem, curso, url, key):
 # =========================
 if 'autenticado' not in st.session_state: st.session_state.autenticado = False
 if 'turmas_ignoradas' not in st.session_state: st.session_state.turmas_ignoradas = []
+if 'mapa_cnpj_uf' not in st.session_state: st.session_state.mapa_cnpj_uf = {}
 
 with st.sidebar:
     if not st.session_state.autenticado:
@@ -151,6 +152,7 @@ with st.sidebar:
         max_alunos = st.number_input("Máximo", min_value=1, value=45)
         if st.button("🚨 Resetar Banco"):
             create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"]).table("planejamentos_turmas").delete().neq("Curso", "0").execute()
+            st.session_state.mapa_cnpj_uf = {}
             st.session_state.dados_salvos = pd.DataFrame(); st.rerun()
         st.divider()
         st.download_button("📥 Baixar Modelo", data=gerar_modelo_excel(), file_name="modelo_senac.xlsx", use_container_width=True)
@@ -186,6 +188,12 @@ if arquivo:
             df_base_original = df_raw.copy()
             mapa = {c: "UF" if str(c).upper() in ["UF", "ESTADO"] else "CNPJ" if str(c).upper() in ["CNPJ", "CLIENTE"] else "Qtde" if str(c).upper() in ["QTDE", "QUANTIDADE", "ALUNOS"] else "Status" if str(c).upper() in ["STATUS", "SITUACAO", "SITUAÇÃO"] else "Curso" if str(c).upper() in ["CURSO", "NOME DO CURSO"] else c for c in df_raw.columns}
             df_raw = df_raw.rename(columns=mapa)
+            
+            # Alimentar o mapa de referência CNPJ -> UF
+            for _, r in df_raw.iterrows():
+                c_limpo = str(r.get("CNPJ", "")).strip()
+                if c_limpo: st.session_state.mapa_cnpj_uf[c_limpo] = str(r.get("UF", ""))
+
             df_motor = df_raw.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
             turmas_estado = df_final_trabalho.to_dict('records') if not df_final_trabalho.empty else []
             
@@ -281,8 +289,9 @@ if not df_final_trabalho.empty:
         df_final_trabalho[colunas_ok],
         column_config={
             "Curso": st.column_config.TextColumn("Curso", disabled=True),
+            "Alunos": st.column_config.NumberColumn("Alunos", disabled=True),
             "CNPJs": st.column_config.TextColumn("CNPJs", width=1000),
-            "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium")
+            "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium", disabled=True)
         },
         use_container_width=True, hide_index=True, key="editor_principal"
     )
@@ -292,20 +301,48 @@ if not df_final_trabalho.empty:
                        data=gerar_excel_final(plano_editado, df_base_original), 
                        file_name="planejamento_senac.xlsx")
 
-    # Salvamento Automático
+    # =========================
+    # SALVAMENTO AUTOMÁTICO E RECALCULO
+    # =========================
     dict_editado = plano_editado.to_dict("records")
     current_hash = hash(str(dict_editado))
-    if "last_saved_hash" not in st.session_state: st.session_state.last_saved_hash = current_hash
+    
+    if "last_saved_hash" not in st.session_state: 
+        st.session_state.last_saved_hash = current_hash
+        
     if current_hash != st.session_state.last_saved_hash:
         st.session_state.last_saved_hash = current_hash
         db_data = []
         for i, row in plano_editado.iterrows():
             orig = df_final_trabalho.iloc[i]
+            
+            # --- NOVA LÓGICA DE ATUALIZAÇÃO AUTOMÁTICA ---
+            dados_cnpj = parse_cnpjs(str(row["CNPJs"]))
+            novo_total_alunos = sum(dados_cnpj.values())
+            
+            novas_ufs_detectadas = []
+            for c in dados_cnpj.keys():
+                uf_encontrada = st.session_state.mapa_cnpj_uf.get(str(c).strip())
+                if uf_encontrada:
+                    novas_ufs_detectadas.append(uf_encontrada)
+            
+            if novas_ufs_detectadas:
+                lista_ufs = ", ".join(sorted(set(novas_ufs_detectadas)))
+            else:
+                lista_ufs = row["UFs"]
+            # --------------------------------------------
+            
             db_data.append({
-                "Curso": row["Curso"], "Turma": row["Turma"], "Alunos": int(row["Alunos"]),
-                "UFs": row["UFs"], "CNPJs": row["CNPJs"], "Status": orig["Status"], "Arquivo": orig["Arquivo"]
+                "Curso": row["Curso"], "Turma": row["Turma"], 
+                "Alunos": int(novo_total_alunos),
+                "UFs": lista_ufs, 
+                "CNPJs": row["CNPJs"], 
+                "Status": orig["Status"], "Arquivo": orig["Arquivo"]
             })
+            
         threading.Thread(target=salvar_background, args=(db_data, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])).start()
+        st.session_state.dados_salvos = pd.DataFrame(db_data)
+        st.rerun()
 
     # =========================
     # ASSISTENTE E LOCALIZADOR
@@ -341,7 +378,7 @@ if not df_final_trabalho.empty:
                             st.session_state.turmas_ignoradas.append(t_b["Turma"]); st.rerun()
         else: st.success("Tudo em conformidade!")
 
-  # =========================
+    # =========================
     # RELATÓRIO: AGUARDANDO ATENDIMENTO (RESUMO + DETALHE NO EXCEL)
     # =========================
     st.divider()
