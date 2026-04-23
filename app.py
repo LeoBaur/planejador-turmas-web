@@ -427,7 +427,7 @@ if not df_final_trabalho.empty:
     # =========================
     st.divider()
     with st.expander("📄 Relatório de CNPJs (Aguardando atendimento)", expanded=True):
-        st.write("CNPJs e quantidades de alunos com status 'Aguardando Atendimento', detalhados por UF.")
+        st.write("CNPJs e quantidades de alunos com status 'Aguardando Atendimento', detalhados por UF e Curso.")
 
         if not df_final_trabalho.empty:
             status_alvo = "Aguardando Atendimento"
@@ -446,14 +446,20 @@ if not df_final_trabalho.empty:
                     total_alunos_linha = sum(cnpjs_na_linha.values())
                     fator = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
                     uf_linha = str(row.get("UFs", "N/A")).split(",")[0].strip()
+                    curso_linha = str(row.get("Curso", "Não Informado"))
 
                     for cnpj, qtd_cnpj in cnpjs_na_linha.items():
                         pendencia_calculada = round(qtd_cnpj * fator)
                         if pendencia_calculada > 0:
-                            lista_pendencias.append({"UF": uf_linha, "CNPJ": cnpj, "Qtd": pendencia_calculada})
+                            lista_pendencias.append({
+                                "Curso": curso_linha,
+                                "UF": uf_linha, 
+                                "CNPJ": cnpj, 
+                                "Qtd": pendencia_calculada
+                            })
 
             if lista_pendencias:
-                df_detalhe = pd.DataFrame(lista_pendencias).groupby(["UF", "CNPJ"], as_index=False)["Qtd"].sum()
+                df_detalhe = pd.DataFrame(lista_pendencias).groupby(["Curso", "UF", "CNPJ"], as_index=False)["Qtd"].sum()
                 df_total_uf = df_detalhe.groupby("UF")["Qtd"].sum().reset_index()
                 df_total_uf.columns = ["UF", "Total Aguardando"]
 
@@ -462,8 +468,8 @@ if not df_final_trabalho.empty:
                     st.write(f"📍 **{row_uf['UF']}:** {int(row_uf['Total Aguardando'])} vagas")
                 
                 st.divider()
-                st.write("**Detalhamento por Cliente:**")
-                st.dataframe(df_detalhe.sort_values(by=["UF", "Qtd"], ascending=[True, False]), 
+                st.write("**Detalhamento por Cliente e Curso:**")
+                st.dataframe(df_detalhe.sort_values(by=["Curso", "UF", "Qtd"], ascending=[True, True, False]), 
                              use_container_width=True, hide_index=True)
 
                 def gerar_excel_pendencias_completo(df_d, df_t):
