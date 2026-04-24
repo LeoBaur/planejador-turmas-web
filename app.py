@@ -355,7 +355,6 @@ if not df_final_trabalho.empty:
                 s_dict_linha = {}
                 s_soma = 0
                 
-                # Lê os status atuais da linha
                 for p in str(row["Status"]).split("|"):
                     if ":" in p:
                         k, v = p.split(":")
@@ -363,7 +362,6 @@ if not df_final_trabalho.empty:
                         s_dict_linha[k] = s_dict_linha.get(k, 0) + int(v)
                         s_soma += int(v)
                 
-                # AJUSTE DA SOMA DO KPI: Se você editou a quantidade na tabela, ele equaliza o status aqui para a conta fechar perfeita
                 if s_soma != total_alunos_linha:
                     diferenca = total_alunos_linha - s_soma
                     if s_dict_linha:
@@ -373,7 +371,6 @@ if not df_final_trabalho.empty:
                     else:
                         s_dict_linha["Aguardando Atendimento"] = total_alunos_linha
                 
-                # Adiciona ao total geral do painel
                 for k, v in s_dict_linha.items():
                     status_totals[k] = status_totals.get(k, 0) + v
 
@@ -447,7 +444,6 @@ if not df_final_trabalho.empty:
             dados_cnpj = parse_cnpjs(str(row["CNPJs"]))
             novo_total_alunos = sum(dados_cnpj.values())
             
-            # AJUSTE NO SALVAMENTO DO STATUS: Corrige a raiz do problema salvando o status alinhado ao novo total da tabela
             s_dict_salvar = {}
             total_status_antigo = 0
             for p in str(orig["Status"]).split("|"):
@@ -555,21 +551,29 @@ if not df_final_trabalho.empty:
                     row_ufs = str(row.get("UFs", ""))
                     cnpjs_na_linha = parse_cnpjs(string_original)
                     total_alunos_linha = sum(cnpjs_na_linha.values())
-                    fator = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
-                    
                     curso_linha = str(row.get("Curso", "Não Informado"))
 
-                    for cnpj, qtd_cnpj in cnpjs_na_linha.items():
-                        pendencia_calculada = round(qtd_cnpj * fator)
-                        if pendencia_calculada > 0:
-                            uf_real = obter_uf_cnpj_seguro(cnpj, string_original, row_ufs)
+                    if total_alunos_linha > 0:
+                        fator = qtd_aguardando_linha / total_alunos_linha
+                        vagas_alocadas = 0
+                        cnpjs_lista = list(cnpjs_na_linha.items())
 
-                            lista_pendencias.append({
-                                "Curso": curso_linha,
-                                "UF": uf_real, 
-                                "CNPJ": cnpj, 
-                                "Qtd": pendencia_calculada
-                            })
+                        for i, (cnpj, qtd_cnpj) in enumerate(cnpjs_lista):
+                            # O último CNPJ da fila absorve a diferença exata para a conta não perder nenhuma vaga por arredondamento
+                            if i == len(cnpjs_lista) - 1:
+                                pendencia_calculada = qtd_aguardando_linha - vagas_alocadas
+                            else:
+                                pendencia_calculada = round(qtd_cnpj * fator)
+                                vagas_alocadas += pendencia_calculada
+
+                            if pendencia_calculada > 0:
+                                uf_real = obter_uf_cnpj_seguro(cnpj, string_original, row_ufs)
+                                lista_pendencias.append({
+                                    "Curso": curso_linha,
+                                    "UF": uf_real, 
+                                    "CNPJ": cnpj, 
+                                    "Qtd": pendencia_calculada
+                                })
 
             if lista_pendencias:
                 df_detalhe = pd.DataFrame(lista_pendencias).groupby(["Curso", "UF", "CNPJ"], as_index=False)["Qtd"].sum()
