@@ -113,7 +113,6 @@ def merge_cnpjs_str(s1, s2):
     for k, v in parse_cnpjs(s2).items():
         d1[k] = d1.get(k, 0) + v
     
-    # AJUSTE CIRÚRGICO: Concatena os textos de origem e destino para a UF viajar junto com o CNPJ no remanejamento
     string_combinada = str(s1) + " | " + str(s2)
     return formatar_cnpjs_agrupados(d1, string_combinada)
 
@@ -255,12 +254,15 @@ df_base_original = pd.DataFrame()
 arquivo = st.file_uploader("📤 Porta de Entrada", type=["xlsx"])
 
 if arquivo:
-    if st.button("🚀 Processar e Salvar", type="primary"):
+    # BOTÃO ATUALIZADO: Agora é um sincronizador inteligente
+    if st.button("🚀 Processar e Sincronizar Base", type="primary"):
         try:
             df_raw = pd.read_excel(arquivo, dtype=str) 
             df_base_original = df_raw.copy()
             mapa = {c: "UF" if str(c).upper() in ["UF", "ESTADO"] else "CNPJ" if str(c).upper() in ["CNPJ", "CLIENTE"] else "Qtde" if str(c).upper() in ["QTDE", "QUANTIDADE", "ALUNOS"] else "Status" if str(c).upper() in ["STATUS", "SITUACAO", "SITUAÇÃO"] else "Curso" if str(c).upper() in ["CURSO", "NOME DO CURSO"] else c for c in df_raw.columns}
             df_raw = df_raw.rename(columns=mapa)
+            
+            df_raw = df_raw.fillna("Não Informado")
             
             if "Qtde" in df_raw.columns:
                 df_raw["Qtde"] = pd.to_numeric(df_raw["Qtde"], errors='coerce').fillna(0).astype(int)
@@ -271,55 +273,107 @@ if arquivo:
                     st.session_state.mapa_cnpj_uf[c_limpo] = str(r.get("UF", "")).strip()
 
             df_motor = df_raw.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
-            turmas_estado = df_final_trabalho.to_dict('records') if not df_final_trabalho.empty else []
-            
-            for curso in df_motor["Curso"].unique():
-                dados_curso = df_motor[df_motor["Curso"] == curso]
-                elementos = []
-                for _, r in dados_curso.iterrows():
-                    elementos.extend([{"UF": str(r["UF"]), "CNPJ": str(r["CNPJ"]), "Status": higienizar_status(r["Status"])}] * int(r["Qtde"]))
-                
-                for t in [x for x in turmas_estado if x["Curso"] == curso]:
-                    vagas = max_alunos - int(t["Alunos"])
-                    if vagas > 0 and elementos:
-                        aloc = elementos[:vagas]; elementos = elementos[vagas:]
-                        t["Alunos"] += len(aloc)
-                        t["UFs"] = merge_strings_list(t["UFs"], ",".join([g["UF"] for g in aloc]))
-                        t["Arquivo"] = merge_strings_list(t.get("Arquivo", ""), arquivo.name)
-                        
-                        c_dict = parse_cnpjs(t["CNPJs"])
-                        for g in aloc: c_dict[g["CNPJ"]] = c_dict.get(g["CNPJ"], 0) + 1
-                        
-                        t["CNPJs"] = formatar_cnpjs_agrupados(c_dict, t.get("CNPJs", ""), t["UFs"])
-                        
-                        s_dict = {}
-                        for p in str(t["Status"]).split("|"):
-                            if ":" in p: k, v = p.split(":"); s_dict[higienizar_status(k)] = int(v)
-                        for g in aloc: s_dict[g["Status"]] = s_dict.get(g["Status"], 0) + 1
-                        t["Status"] = "|".join([f"{k}:{v}" for k, v in s_dict.items()])
 
-                while elementos:
-                    tam = min(len(elementos), max_alunos)
-                    aloc = elementos[:tam]; elementos = elementos[tam:]
-                    c_dict = {}; s_dict = {}
-                    for g in aloc: 
-                        c_dict[g["CNPJ"]] = c_dict.get(g["CNPJ"], 0) + 1
-                        s_dict[g["Status"]] = s_dict.get(g["Status"], 0) + 1
-                    
-                    uf_agrupada = ",".join(set(g["UF"] for g in aloc))
-                    turmas_estado.append({
-                        "Curso": curso, "Turma": f"{curso[:3].upper()}-{len([x for x in turmas_estado if x['Curso']==curso])+1:02d}",
-                        "Alunos": len(aloc), "UFs": uf_agrupada,
-                        "CNPJs": formatar_cnpjs_agrupados(c_dict, "", uf_agrupada),
-                        "Status": "|".join([f"{k}:{v}" for k, v in s_dict.items()]), "Arquivo": arquivo.name
-                    })
+            # 1. MAPEAMENTO DO ESTADO ATUAL (Memória do remanejamento)
+            mapeamento_alocacao = {}
+            for _, row in df_final_trabalho.iterrows():
+                curso_atual = row["Curso"]
+                turma_atual = row["Turma"]
+                cnpjs_dict = parse_cnpjs(str(row["CNPJs"]))
+                for cnpj, qtd in cnpjs_dict.items():
+                    chave = (curso_atual, clean_key(cnpj))
+                    if chave not in mapeamento_alocacao:
+                        mapeamento_alocacao[chave] = []
+                    mapeamento_alocacao[chave].append({"Turma": turma_atual, "capacidade": qtd})
+
+            # 2. DESCONSTRUIR O NOVO EXCEL (A Verdade Absoluta)
+            elementos_por_curso = {}
+            for _, r in df_motor.iterrows():
+                curso = r["Curso"]
+                if curso not in elementos_por_curso: elementos_por_curso[curso] = []
+                elementos_por_curso[curso].extend([{"UF": str(r["UF"]), "CNPJ": str(r["CNPJ"]), "Status": higienizar_status(r["Status"])}] * int(r["Qtde"]))
+
+            novas_turmas_dict = {}
+            elementos_nao_alocados = {c: [] for c in elementos_por_curso}
+
+            # 3. PRIMEIRA PASSAGEM: Encaixar alunos nas turmas onde já estavam
+            for curso, elementos in elementos_por_curso.items():
+                for el in elementos:
+                    chave_map = (curso, clean_key(el["CNPJ"]))
+                    alocado = False
+                    if chave_map in mapeamento_alocacao:
+                        for pref in mapeamento_alocacao[chave_map]:
+                            if pref["capacidade"] > 0:
+                                turma_alvo = pref["Turma"]
+                                if (curso, turma_alvo) not in novas_turmas_dict:
+                                    novas_turmas_dict[(curso, turma_alvo)] = []
+                                if len(novas_turmas_dict[(curso, turma_alvo)]) < max_alunos:
+                                    novas_turmas_dict[(curso, turma_alvo)].append(el)
+                                    pref["capacidade"] -= 1
+                                    alocado = True
+                                    break
+                    if not alocado:
+                        elementos_nao_alocados[curso].append(el)
+
+            # 4. SEGUNDA PASSAGEM: Alocar alunos excedentes ou novas vagas
+            for curso, elementos in elementos_nao_alocados.items():
+                for el in elementos:
+                    alocado = False
+                    turmas_deste_curso = [k for k in novas_turmas_dict.keys() if k[0] == curso]
+                    turmas_deste_curso.sort()
+                    for k_turma in turmas_deste_curso:
+                        if len(novas_turmas_dict[k_turma]) < max_alunos:
+                            novas_turmas_dict[k_turma].append(el)
+                            alocado = True
+                            break
+
+                    if not alocado:
+                        max_num = 0
+                        for (c, t) in novas_turmas_dict.keys():
+                            if c == curso:
+                                try:
+                                    match = re.search(r'\d+', t)
+                                    if match:
+                                        num = int(match.group())
+                                        if num > max_num: max_num = num
+                                except: pass
+                        nova_turma_nome = f"{curso[:3].upper()}-{max_num+1:02d}"
+                        novas_turmas_dict[(curso, nova_turma_nome)] = [el]
+
+            # 5. MONTAR A LISTA FINAL (Se algo não estiver no novo Excel, simplesmente some daqui)
+            turmas_estado = []
+            for (curso, turma_nome), elementos in novas_turmas_dict.items():
+                if not elementos: continue
+
+                c_dict = {}
+                s_dict = {}
+                uf_set = set()
+
+                for g in elementos:
+                    c_dict[g["CNPJ"]] = c_dict.get(g["CNPJ"], 0) + 1
+                    s_dict[g["Status"]] = s_dict.get(g["Status"], 0) + 1
+                    if g["UF"] and g["UF"] not in ["nan", "N/I", "Não Informado"]: uf_set.add(g["UF"])
+
+                uf_agrupada = ",".join(sorted(uf_set))
+
+                turmas_estado.append({
+                    "Curso": curso,
+                    "Turma": turma_nome,
+                    "Alunos": len(elementos),
+                    "UFs": uf_agrupada,
+                    "CNPJs": formatar_cnpjs_agrupados(c_dict, "", uf_agrupada),
+                    "Status": "|".join([f"{k}:{v}" for k, v in s_dict.items()]),
+                    "Arquivo": arquivo.name
+                })
 
             init_connection().table("planejamentos_turmas").delete().neq("Curso", "0").execute()
-            for t in turmas_estado: 
-                if "id" in t: del t["id"]
-            init_connection().table("planejamentos_turmas").insert(turmas_estado).execute()
-            st.session_state.dados_salvos = carregar_do_banco(); st.rerun()
-        except Exception as e: st.error(f"Erro: {e}")
+            if turmas_estado:
+                init_connection().table("planejamentos_turmas").insert(turmas_estado).execute()
+                
+            st.session_state.dados_salvos = carregar_do_banco()
+            st.rerun()
+            
+        except Exception as e: st.error(f"Erro ao processar arquivo: {e}")
 
 # =========================
 # GESTOR DE ARQUIVOS
@@ -467,7 +521,6 @@ if not df_final_trabalho.empty:
             
             novo_status_atualizado = "|".join([f"{k}:{v}" for k, v in s_dict_salvar.items()])
             
-            # AJUSTE CIRÚRGICO: Combina os textos para nunca perder o contexto da UF numa edição
             string_busca_uf = str(row["CNPJs"]) + " | " + str(orig.get("CNPJs", ""))
             
             novas_ufs_detectadas = []
@@ -480,7 +533,6 @@ if not df_final_trabalho.empty:
                         if u.strip() and u.strip() != "nan":
                             novas_ufs_detectadas.append(u.strip())
                 
-                # NOVO: Se falhar a memória, caça diretamente no texto combinado
                 uf_txt = obter_uf_cnpj_seguro(c, string_busca_uf, "")
                 if uf_txt != "N/I" and uf_txt not in novas_ufs_detectadas:
                     novas_ufs_detectadas.append(uf_txt)
