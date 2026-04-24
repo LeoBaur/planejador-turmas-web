@@ -71,6 +71,24 @@ def descobrir_uf_cnpj(cnpj, row_ufs):
     
     return "N/I"
 
+# Função NOVA: Formata os CNPJs garantindo que fiquem agrupados/ordenados pela UF
+def formatar_cnpjs_agrupados(cnpj_dict, fallback_ufs=""):
+    itens = []
+    for cnpj, qtd in cnpj_dict.items():
+        uf = descobrir_uf_cnpj(cnpj, fallback_ufs)
+        itens.append((uf, cnpj, qtd))
+    
+    # Ordena primeiro pela UF (x[0]), depois pelo CNPJ (x[1])
+    itens.sort(key=lambda x: (x[0], x[1]))
+    
+    res = []
+    for uf, cnpj, qtd in itens:
+        if qtd > 0:
+            res.append(f"{cnpj} ({qtd} - {uf})")
+        else:
+            res.append(cnpj)
+    return ", ".join(res)
+
 # =========================
 # LÓGICA DE STRINGS E PARSERS
 # =========================
@@ -81,7 +99,7 @@ def parse_cnpjs(cnpj_str):
     for p in str(cnpj_str).split(","):
         p = p.strip()
         if not p: continue
-        # REGEX AJUSTADO: Agora ele ignora tudo que estiver depois do número dentro do parênteses.
+        # Ignora a UF ao ler os dados antigos, pois ela será gerada dinamicamente e de forma limpa depois
         match = re.match(r"(.+?)\s*\((\d+).*?\)", p)
         if match:
             c, q = match.group(1).strip(), int(match.group(2))
@@ -94,15 +112,7 @@ def merge_cnpjs_str(s1, s2):
     d1 = parse_cnpjs(s1)
     for k, v in parse_cnpjs(s2).items():
         d1[k] = d1.get(k, 0) + v
-    
-    res = []
-    for k, v in sorted(d1.items()):
-        if v > 0:
-            uf = descobrir_uf_cnpj(k, "")
-            res.append(f"{k} ({v} - {uf})")
-        else:
-            res.append(k)
-    return ", ".join(res)
+    return formatar_cnpjs_agrupados(d1, "")
 
 def merge_strings_list(s1, s2):
     l1 = [x.strip() for x in str(s1).split(",") if x.strip() and x.strip() != "nan"]
@@ -279,8 +289,9 @@ if arquivo:
                         
                         c_dict = parse_cnpjs(t["CNPJs"])
                         for g in aloc: c_dict[g["CNPJ"]] = c_dict.get(g["CNPJ"], 0) + 1
-                        # Adicionando visualmente a UF na hora da mescla
-                        t["CNPJs"] = ", ".join([f"{k} ({v} - {descobrir_uf_cnpj(k, t['UFs'])})" for k, v in sorted(c_dict.items())])
+                        
+                        # Usando a nova função para alinhar e ordenar por UF
+                        t["CNPJs"] = formatar_cnpjs_agrupados(c_dict, t['UFs'])
                         
                         s_dict = {}
                         for p in str(t["Status"]).split("|"):
@@ -300,8 +311,8 @@ if arquivo:
                     turmas_estado.append({
                         "Curso": curso, "Turma": f"{curso[:3].upper()}-{len([x for x in turmas_estado if x['Curso']==curso])+1:02d}",
                         "Alunos": len(aloc), "UFs": uf_agrupada,
-                        # Adicionando visualmente a UF na criação da nova turma
-                        "CNPJs": ", ".join([f"{k} ({v} - {descobrir_uf_cnpj(k, uf_agrupada)})" for k, v in sorted(c_dict.items())]),
+                        # Usando a nova função para alinhar e ordenar por UF
+                        "CNPJs": formatar_cnpjs_agrupados(c_dict, uf_agrupada),
                         "Status": "|".join([f"{k}:{v}" for k, v in s_dict.items()]), "Arquivo": arquivo.name
                     })
 
@@ -430,12 +441,8 @@ if not df_final_trabalho.empty:
             
             nova_uf_str = ", ".join(sorted(set(novas_ufs_detectadas))) if novas_ufs_detectadas else orig["UFs"]
             
-            # Formatação inteligente: garante que, mesmo após a edição, a UF volte bonita para o texto
-            cnpjs_formatados = []
-            for k, v in sorted(dados_cnpj.items()):
-                uf_real = descobrir_uf_cnpj(k, nova_uf_str)
-                cnpjs_formatados.append(f"{k} ({v} - {uf_real})")
-            cnpjs_final_str = ", ".join(cnpjs_formatados)
+            # Chama a função inteligente de formatação antes de salvar no banco
+            cnpjs_final_str = formatar_cnpjs_agrupados(dados_cnpj, nova_uf_str)
             
             db_data.append({
                 "Curso": row["Curso"], "Turma": row["Turma"], 
