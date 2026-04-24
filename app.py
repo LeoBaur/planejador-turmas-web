@@ -50,37 +50,43 @@ def salvar_background(dados_dict, url, key):
     except Exception:
         pass
 
+# Função para garantir que os CNPJs sejam comparados de forma exata (sem .0 ou espaços)
 def clean_key(k):
     s = str(k).strip().upper()
     if s.endswith(".0"): 
         s = s[:-2]
     return s
 
-# NOVA FUNÇÃO SEGURA: Busca a UF sem interferir nas turmas mescladas
-def obter_uf_cnpj_seguro(cnpj, string_original=""):
+# Função unificada e robusta para descobrir a UF de um CNPJ específico
+def obter_uf_cnpj_seguro(cnpj, string_original="", fallback_ufs=""):
     c_clean = clean_key(cnpj)
     uf_ref = st.session_state.mapa_cnpj_uf.get(c_clean)
     
-    # 1. Tenta achar na memória principal
+    # 1. Tenta achar no mapa de memória
     if uf_ref and str(uf_ref).strip() not in ["", "nan", "None", "N/A"]:
         return str(uf_ref).split(",")[0].strip()
     
-    # 2. Tenta ler diretamente do texto da célula se estiver no formato (10 - SP)
+    # 2. Tenta extrair do texto visual se já estiver lá
     if string_original:
         match = re.search(re.escape(cnpj) + r"\s*\(\d+\s*-\s*([A-Za-z]{2})\)", string_original)
         if match:
             return match.group(1).upper()
             
+    # 3. Fallback inteligente: se a turma antiga só tinha uma UF, então é ela
+    ufs_turma = [u.strip() for u in str(fallback_ufs).split(",") if u.strip() and u.strip() != "nan"]
+    if len(ufs_turma) == 1:
+        return ufs_turma[0]
+        
     return "Não Informado"
 
-# FUNÇÃO DE FORMATAÇÃO: Ordena alfabeticamente pela UF e depois pelo CNPJ
-def formatar_cnpjs_agrupados(cnpj_dict, string_original=""):
+# Nova Função: Formata e agrupa ordenado por UF
+def formatar_cnpjs_agrupados(cnpj_dict, string_original="", fallback_ufs=""):
     itens = []
     for cnpj, qtd in cnpj_dict.items():
-        uf = obter_uf_cnpj_seguro(cnpj, string_original)
+        uf = obter_uf_cnpj_seguro(cnpj, string_original, fallback_ufs)
         itens.append((uf, cnpj, qtd))
     
-    # Ordena: Primeiro a UF, depois o CNPJ
+    # Ordena primeiro pela UF, depois pelo CNPJ
     itens.sort(key=lambda x: (x[0], x[1]))
     
     res = []
@@ -101,7 +107,7 @@ def parse_cnpjs(cnpj_str):
     for p in str(cnpj_str).split(","):
         p = p.strip()
         if not p: continue
-        # Regex atualizado que entende e ignora a UF para não quebrar a contagem matemática
+        # REGEX que entende o formato antigo (10) e o novo (10 - SP) sem quebrar a matemática
         match = re.match(r"(.+?)\s*\((\d+).*?\)", p)
         if match:
             c, q = match.group(1).strip(), int(match.group(2))
@@ -179,6 +185,7 @@ def distribuir_turma(nome_origem, curso, url, key):
 if 'autenticado' not in st.session_state: 
     st.session_state.autenticado = False
 
+# Verificação de persistência de login (2 horas = 7200 segundos)
 if not st.session_state.autenticado and "login_time" in st.query_params:
     try:
         if time.time() - float(st.query_params["login_time"]) < 7200:
@@ -231,6 +238,7 @@ def carregar_do_banco():
 
 if "dados_salvos" not in st.session_state:
     st.session_state.dados_salvos = carregar_do_banco()
+    # Popula o mapa de UFs a partir do banco para reconhecer mesmo sem subir arquivo
     if not st.session_state.dados_salvos.empty:
         for _, row_db in st.session_state.dados_salvos.iterrows():
             ufs_banco = [u.strip() for u in str(row_db.get("UFs", "")).split(",") if u.strip() and u.strip() != "nan"]
@@ -247,6 +255,7 @@ if "dados_salvos" not in st.session_state:
 st.title("📊 Planejador Inteligente de Turmas")
 df_final_trabalho = st.session_state.dados_salvos.copy()
 
+# Fixando a ordem da planilha para evitar pulos quando a página recarregar
 if not df_final_trabalho.empty:
     df_final_trabalho = df_final_trabalho.sort_values(by=["Curso", "Turma"]).reset_index(drop=True)
 
@@ -289,8 +298,8 @@ if arquivo:
                         c_dict = parse_cnpjs(t["CNPJs"])
                         for g in aloc: c_dict[g["CNPJ"]] = c_dict.get(g["CNPJ"], 0) + 1
                         
-                        # Formata agrupando os UFs de forma limpa
-                        t["CNPJs"] = formatar_cnpjs_agrupados(c_dict, t.get("CNPJs", ""))
+                        # Formata de forma segura na inserção de novos alunos na turma existente
+                        t["CNPJs"] = formatar_cnpjs_agrupados(c_dict, t.get("CNPJs", ""), t["UFs"])
                         
                         s_dict = {}
                         for p in str(t["Status"]).split("|"):
@@ -311,7 +320,7 @@ if arquivo:
                         "Curso": curso, "Turma": f"{curso[:3].upper()}-{len([x for x in turmas_estado if x['Curso']==curso])+1:02d}",
                         "Alunos": len(aloc), "UFs": uf_agrupada,
                         # Formata agrupando na criação
-                        "CNPJs": formatar_cnpjs_agrupados(c_dict, ""),
+                        "CNPJs": formatar_cnpjs_agrupados(c_dict, "", uf_agrupada),
                         "Status": "|".join([f"{k}:{v}" for k, v in s_dict.items()]), "Arquivo": arquivo.name
                     })
 
@@ -369,11 +378,11 @@ if not df_final_trabalho.empty:
         for _, row in df_final_trabalho.iterrows():
             curso_atual = row["Curso"]
             string_cnpjs_celula = str(row["CNPJs"])
+            row_ufs = str(row.get("UFs", ""))
             cnpjs_dict = parse_cnpjs(string_cnpjs_celula)
             
             for cnpj, qtd in cnpjs_dict.items():
-                # Usa a função blindada
-                uf_atual = obter_uf_cnpj_seguro(cnpj, string_cnpjs_celula)
+                uf_atual = obter_uf_cnpj_seguro(cnpj, string_cnpjs_celula, row_ufs)
                 vagas_curso_uf.append({"Curso": curso_atual, "UF": uf_atual, "Vagas": qtd})
 
         if vagas_curso_uf:
@@ -441,8 +450,8 @@ if not df_final_trabalho.empty:
             
             nova_uf_str = ", ".join(sorted(set(novas_ufs_detectadas))) if novas_ufs_detectadas else orig["UFs"]
             
-            # Chama a função inteligente de ordenamento por UF antes de salvar no banco
-            cnpjs_final_str = formatar_cnpjs_agrupados(dados_cnpj, str(row["CNPJs"]))
+            # Formata inteligentemente antes de salvar (Isso resolve os antigos sem corromper)
+            cnpjs_final_str = formatar_cnpjs_agrupados(dados_cnpj, str(row["CNPJs"]), nova_uf_str)
             
             db_data.append({
                 "Curso": row["Curso"], "Turma": row["Turma"], 
@@ -514,6 +523,7 @@ if not df_final_trabalho.empty:
 
                 if qtd_aguardando_linha > 0:
                     string_original = str(row.get("CNPJs", ""))
+                    row_ufs = str(row.get("UFs", ""))
                     cnpjs_na_linha = parse_cnpjs(string_original)
                     total_alunos_linha = sum(cnpjs_na_linha.values())
                     fator = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
@@ -523,8 +533,7 @@ if not df_final_trabalho.empty:
                     for cnpj, qtd_cnpj in cnpjs_na_linha.items():
                         pendencia_calculada = round(qtd_cnpj * fator)
                         if pendencia_calculada > 0:
-                            # Chama a função blindada que usa a memória ou a própria célula pra achar a UF
-                            uf_real = obter_uf_cnpj_seguro(cnpj, string_original)
+                            uf_real = obter_uf_cnpj_seguro(cnpj, string_original, row_ufs)
 
                             lista_pendencias.append({
                                 "Curso": curso_linha,
@@ -534,24 +543,33 @@ if not df_final_trabalho.empty:
                             })
 
             if lista_pendencias:
+                # Agrupa os dados
                 df_detalhe = pd.DataFrame(lista_pendencias).groupby(["Curso", "UF", "CNPJ"], as_index=False)["Qtd"].sum()
-                df_total_uf = df_detalhe.groupby("UF")["Qtd"].sum().reset_index()
-                df_total_uf.columns = ["UF", "Total Aguardando"]
+                
+                # Prepara o Resumo com Curso e UF
+                df_total_uf = df_detalhe.groupby(["Curso", "UF"])["Qtd"].sum().reset_index()
+                df_total_uf.columns = ["Curso", "UF", "Total Aguardando"]
+                df_total_uf = df_total_uf.sort_values(by=["Curso", "UF"])
 
-                st.write("**Total de Vagas por UF:**")
+                st.write("**Total de Vagas por Curso e UF:**")
                 for _, row_uf in df_total_uf.iterrows():
-                    st.write(f"📍 **{row_uf['UF']}:** {int(row_uf['Total Aguardando'])} vagas")
+                    st.write(f"📍 **{row_uf['Curso']} ({row_uf['UF']}):** {int(row_uf['Total Aguardando'])} vagas")
                 
                 st.divider()
                 st.write("**Detalhamento por Cliente e Curso:**")
-                st.dataframe(df_detalhe.sort_values(by=["Curso", "UF", "Qtd"], ascending=[True, True, False]), 
-                             use_container_width=True, hide_index=True)
+                
+                # Configurações de exibição na tela
+                colunas_exibicao = ["Curso", "UF", "CNPJ", "Qtd"]
+                df_exibicao = df_detalhe[colunas_exibicao].sort_values(by=["Curso", "UF", "Qtd"], ascending=[True, True, False])
+                st.dataframe(df_exibicao, use_container_width=True, hide_index=True)
 
+                # Função de exportação para Excel formatada para Cobrança
                 def gerar_excel_pendencias_completo(df_d, df_t):
                     output = BytesIO()
                     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                        df_t.to_excel(writer, index=False, sheet_name="Resumo_por_UF")
-                        df_d.to_excel(writer, index=False, sheet_name="Detalhe_por_CNPJ")
+                        # Força explicitamente a ordem das colunas no Excel: Curso, UF, Dados
+                        df_t[["Curso", "UF", "Total Aguardando"]].to_excel(writer, index=False, sheet_name="Resumo_Curso_UF")
+                        df_d[["Curso", "UF", "CNPJ", "Qtd"]].sort_values(by=["Curso", "UF", "Qtd"], ascending=[True, True, False]).to_excel(writer, index=False, sheet_name="Detalhe_por_CNPJ")
                     return output.getvalue()
 
                 st.download_button(
