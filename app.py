@@ -62,16 +62,14 @@ def descobrir_uf_cnpj(cnpj, row_ufs):
     c_clean = clean_key(cnpj)
     uf_ref = st.session_state.mapa_cnpj_uf.get(c_clean)
     
-    # Se encontrou no mapa de memória, retorna a UF correta
     if uf_ref and str(uf_ref).strip() not in ["", "nan", "N/A", "None"]:
         return str(uf_ref).split(",")[0].strip()
     
-    # Fallback inteligente: se a turma inteira só tem 1 UF, o CNPJ com certeza é dela
     ufs_turma = [u.strip() for u in str(row_ufs).split(",") if u.strip() and u.strip() != "nan"]
     if len(ufs_turma) == 1:
         return ufs_turma[0]
     
-    return "Não Informado"
+    return "N/I"
 
 # =========================
 # LÓGICA DE STRINGS E PARSERS
@@ -83,7 +81,8 @@ def parse_cnpjs(cnpj_str):
     for p in str(cnpj_str).split(","):
         p = p.strip()
         if not p: continue
-        match = re.match(r"(.+?)\s*\((\d+)\)", p)
+        # REGEX AJUSTADO: Agora ele ignora tudo que estiver depois do número dentro do parênteses.
+        match = re.match(r"(.+?)\s*\((\d+).*?\)", p)
         if match:
             c, q = match.group(1).strip(), int(match.group(2))
             res[c] = res.get(c, 0) + q
@@ -95,7 +94,15 @@ def merge_cnpjs_str(s1, s2):
     d1 = parse_cnpjs(s1)
     for k, v in parse_cnpjs(s2).items():
         d1[k] = d1.get(k, 0) + v
-    return ", ".join([f"{k} ({v})" if v > 0 else k for k, v in sorted(d1.items())])
+    
+    res = []
+    for k, v in sorted(d1.items()):
+        if v > 0:
+            uf = descobrir_uf_cnpj(k, "")
+            res.append(f"{k} ({v} - {uf})")
+        else:
+            res.append(k)
+    return ", ".join(res)
 
 def merge_strings_list(s1, s2):
     l1 = [x.strip() for x in str(s1).split(",") if x.strip() and x.strip() != "nan"]
@@ -269,9 +276,12 @@ if arquivo:
                         t["Alunos"] += len(aloc)
                         t["UFs"] = merge_strings_list(t["UFs"], ",".join([g["UF"] for g in aloc]))
                         t["Arquivo"] = merge_strings_list(t.get("Arquivo", ""), arquivo.name)
+                        
                         c_dict = parse_cnpjs(t["CNPJs"])
                         for g in aloc: c_dict[g["CNPJ"]] = c_dict.get(g["CNPJ"], 0) + 1
-                        t["CNPJs"] = ", ".join([f"{k} ({v})" for k, v in sorted(c_dict.items())])
+                        # Adicionando visualmente a UF na hora da mescla
+                        t["CNPJs"] = ", ".join([f"{k} ({v} - {descobrir_uf_cnpj(k, t['UFs'])})" for k, v in sorted(c_dict.items())])
+                        
                         s_dict = {}
                         for p in str(t["Status"]).split("|"):
                             if ":" in p: k, v = p.split(":"); s_dict[higienizar_status(k)] = int(v)
@@ -285,10 +295,13 @@ if arquivo:
                     for g in aloc: 
                         c_dict[g["CNPJ"]] = c_dict.get(g["CNPJ"], 0) + 1
                         s_dict[g["Status"]] = s_dict.get(g["Status"], 0) + 1
+                    
+                    uf_agrupada = ",".join(set(g["UF"] for g in aloc))
                     turmas_estado.append({
                         "Curso": curso, "Turma": f"{curso[:3].upper()}-{len([x for x in turmas_estado if x['Curso']==curso])+1:02d}",
-                        "Alunos": len(aloc), "UFs": ",".join(set(g["UF"] for g in aloc)),
-                        "CNPJs": ", ".join([f"{k} ({v})" for k, v in sorted(c_dict.items())]),
+                        "Alunos": len(aloc), "UFs": uf_agrupada,
+                        # Adicionando visualmente a UF na criação da nova turma
+                        "CNPJs": ", ".join([f"{k} ({v} - {descobrir_uf_cnpj(k, uf_agrupada)})" for k, v in sorted(c_dict.items())]),
                         "Status": "|".join([f"{k}:{v}" for k, v in s_dict.items()]), "Arquivo": arquivo.name
                     })
 
@@ -349,7 +362,6 @@ if not df_final_trabalho.empty:
             cnpjs_dict = parse_cnpjs(str(row["CNPJs"]))
             
             for cnpj, qtd in cnpjs_dict.items():
-                # Usa a função blindada para achar a UF real do CNPJ
                 uf_atual = descobrir_uf_cnpj(cnpj, row_ufs)
                 vagas_curso_uf.append({"Curso": curso_atual, "UF": uf_atual, "Vagas": qtd})
 
@@ -418,11 +430,18 @@ if not df_final_trabalho.empty:
             
             nova_uf_str = ", ".join(sorted(set(novas_ufs_detectadas))) if novas_ufs_detectadas else orig["UFs"]
             
+            # Formatação inteligente: garante que, mesmo após a edição, a UF volte bonita para o texto
+            cnpjs_formatados = []
+            for k, v in sorted(dados_cnpj.items()):
+                uf_real = descobrir_uf_cnpj(k, nova_uf_str)
+                cnpjs_formatados.append(f"{k} ({v} - {uf_real})")
+            cnpjs_final_str = ", ".join(cnpjs_formatados)
+            
             db_data.append({
                 "Curso": row["Curso"], "Turma": row["Turma"], 
                 "Alunos": int(novo_total_alunos),
                 "UFs": nova_uf_str, 
-                "CNPJs": row["CNPJs"], 
+                "CNPJs": cnpjs_final_str, 
                 "Status": orig["Status"], "Arquivo": orig["Arquivo"]
             })
             
@@ -497,7 +516,6 @@ if not df_final_trabalho.empty:
                     for cnpj, qtd_cnpj in cnpjs_na_linha.items():
                         pendencia_calculada = round(qtd_cnpj * fator)
                         if pendencia_calculada > 0:
-                            # Usa a função blindada para achar a UF real do CNPJ
                             uf_real = descobrir_uf_cnpj(cnpj, row_ufs)
 
                             lista_pendencias.append({
