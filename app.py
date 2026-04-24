@@ -50,43 +50,36 @@ def salvar_background(dados_dict, url, key):
     except Exception:
         pass
 
-# Função para garantir que os CNPJs sejam comparados de forma exata (sem .0 ou espaços)
 def clean_key(k):
     s = str(k).strip().upper()
     if s.endswith(".0"): 
         s = s[:-2]
     return s
 
-# Função unificada e robusta para descobrir a UF de um CNPJ específico
 def obter_uf_cnpj_seguro(cnpj, string_original="", fallback_ufs=""):
     c_clean = clean_key(cnpj)
     uf_ref = st.session_state.mapa_cnpj_uf.get(c_clean)
     
-    # 1. Tenta achar no mapa de memória
     if uf_ref and str(uf_ref).strip() not in ["", "nan", "None", "N/A"]:
         return str(uf_ref).split(",")[0].strip()
     
-    # 2. Tenta extrair do texto visual se já estiver lá
     if string_original:
-        match = re.search(re.escape(cnpj) + r"\s*\(\d+\s*-\s*([A-Za-z]{2})\)", string_original)
+        match = re.search(re.escape(cnpj) + r"\s*\(\s*\d+\s*-\s*([A-Za-z]{2})\s*\)", string_original)
         if match:
             return match.group(1).upper()
             
-    # 3. Fallback inteligente: se a turma antiga só tinha uma UF, então é ela
-    ufs_turma = [u.strip() for u in str(fallback_ufs).split(",") if u.strip() and u.strip() != "nan"]
+    ufs_turma = [u.strip() for u in str(fallback_ufs).split(",") if u.strip() and u.strip() not in ["nan", "N/I"]]
     if len(ufs_turma) == 1:
         return ufs_turma[0]
         
-    return "Não Informado"
+    return "N/I"
 
-# Nova Função: Formata e agrupa ordenado por UF
 def formatar_cnpjs_agrupados(cnpj_dict, string_original="", fallback_ufs=""):
     itens = []
     for cnpj, qtd in cnpj_dict.items():
         uf = obter_uf_cnpj_seguro(cnpj, string_original, fallback_ufs)
         itens.append((uf, cnpj, qtd))
     
-    # Ordena primeiro pela UF, depois pelo CNPJ
     itens.sort(key=lambda x: (x[0], x[1]))
     
     res = []
@@ -98,19 +91,27 @@ def formatar_cnpjs_agrupados(cnpj_dict, string_original="", fallback_ufs=""):
     return ", ".join(res)
 
 # =========================
-# LÓGICA DE STRINGS E PARSERS
+# LÓGICA DE STRINGS E PARSERS BLINDADA
 # =========================
 def parse_cnpjs(cnpj_str):
     res = {}
-    if pd.isna(cnpj_str) or str(cnpj_str).strip() in ["", "nan"]:
+    if pd.isna(cnpj_str) or str(cnpj_str).strip() in ["", "nan", "None"]:
         return res
-    for p in str(cnpj_str).split(","):
+    
+    # Removemos quebras de linha que quebravam as contas
+    s = str(cnpj_str).replace("\n", " ").replace("\r", "")
+    
+    for p in s.split(","):
         p = p.strip()
         if not p: continue
-        # REGEX que entende o formato antigo (10) e o novo (10 - SP) sem quebrar a matemática
-        match = re.match(r"(.+?)\s*\((\d+).*?\)", p)
+        
+        # BUSCA INTELIGENTE: Caça diretamente onde começa o "(Numero"
+        # Isso impede que a conta zere se o nome da empresa tiver símbolos estranhos
+        match = re.search(r"\(\s*(\d+)", p)
         if match:
-            c, q = match.group(1).strip(), int(match.group(2))
+            q = int(match.group(1))
+            c = p[:match.start()].strip()
+            if not c: c = p
             res[c] = res.get(c, 0) + q
         else:
             res[p] = res.get(p, 0) + 0 
@@ -128,64 +129,11 @@ def merge_strings_list(s1, s2):
     return ", ".join(sorted(set(l1 + l2)))
 
 # =========================
-# LÓGICA DE FUSÃO E DISTRIBUIÇÃO
-# =========================
-def fundir_turmas(nome_origem, nome_destino, curso, url, key):
-    client = create_client(url, key)
-    res = client.table("planejamentos_turmas").select("*").eq("Curso", curso).in_("Turma", [nome_origem, nome_destino]).execute()
-    df_db = pd.DataFrame(res.data)
-    if len(df_db) == 2:
-        origem = df_db[df_db["Turma"] == nome_origem].iloc[0]
-        destino = df_db[df_db["Turma"] == nome_destino].iloc[0]
-        
-        novos_alunos = int(destino["Alunos"]) + int(origem["Alunos"])
-        novas_ufs = merge_strings_list(origem["UFs"], destino["UFs"])
-        novos_arqs = merge_strings_list(origem["Arquivo"], destino["Arquivo"])
-        novos_cnpjs = merge_cnpjs_str(origem["CNPJs"], destino["CNPJs"])
-        
-        stats_dict = {}
-        for s in [str(origem["Status"]), str(destino["Status"])]:
-            for p in s.split("|"):
-                if ":" in p:
-                    k, v = p.split(":")
-                    k_clean = higienizar_status(k)
-                    stats_dict[k_clean] = stats_dict.get(k_clean, 0) + int(v)
-        novo_status = "|".join([f"{k}:{v}" for k, v in stats_dict.items()])
-        
-        client.table("planejamentos_turmas").update({
-            "Alunos": novos_alunos, "CNPJs": novos_cnpjs, "UFs": novas_ufs,
-            "Arquivo": novos_arqs, "Status": novo_status
-        }).eq("id", destino["id"]).execute()
-        client.table("planejamentos_turmas").delete().eq("id", origem["id"]).execute()
-
-def distribuir_turma(nome_origem, curso, url, key):
-    client = create_client(url, key)
-    res = client.table("planejamentos_turmas").select("*").eq("Curso", curso).execute()
-    df_db = pd.DataFrame(res.data)
-    origem = df_db[df_db["Turma"] == nome_origem].iloc[0]
-    destinos = df_db[df_db["Turma"] != nome_origem]
-    if destinos.empty: return
-
-    alunos_total = int(origem["Alunos"])
-    adds = [alunos_total // len(destinos)] * len(destinos)
-    for i in range(alunos_total % len(destinos)): adds[i] += 1
-    
-    for i, (_, dest) in enumerate(destinos.iterrows()):
-        client.table("planejamentos_turmas").update({
-            "Alunos": int(dest["Alunos"]) + adds[i],
-            "UFs": merge_strings_list(dest["UFs"], origem["UFs"]),
-            "CNPJs": merge_cnpjs_str(dest["CNPJs"], origem["CNPJs"]),
-            "Status": str(dest["Status"]) + "|" + str(origem["Status"])
-        }).eq("id", dest["id"]).execute()
-    client.table("planejamentos_turmas").delete().eq("id", origem["id"]).execute()
-
-# =========================
 # LOGIN E BANCO DE DADOS
 # =========================
 if 'autenticado' not in st.session_state: 
     st.session_state.autenticado = False
 
-# Verificação de persistência de login (2 horas = 7200 segundos)
 if not st.session_state.autenticado and "login_time" in st.query_params:
     try:
         if time.time() - float(st.query_params["login_time"]) < 7200:
@@ -238,7 +186,6 @@ def carregar_do_banco():
 
 if "dados_salvos" not in st.session_state:
     st.session_state.dados_salvos = carregar_do_banco()
-    # Popula o mapa de UFs a partir do banco para reconhecer mesmo sem subir arquivo
     if not st.session_state.dados_salvos.empty:
         for _, row_db in st.session_state.dados_salvos.iterrows():
             ufs_banco = [u.strip() for u in str(row_db.get("UFs", "")).split(",") if u.strip() and u.strip() != "nan"]
@@ -255,9 +202,12 @@ if "dados_salvos" not in st.session_state:
 st.title("📊 Planejador Inteligente de Turmas")
 df_final_trabalho = st.session_state.dados_salvos.copy()
 
-# Fixando a ordem da planilha para evitar pulos quando a página recarregar
+# MIGRAÇÃO AUTOMÁTICA DE DADOS ANTIGOS (Segura)
 if not df_final_trabalho.empty:
     df_final_trabalho = df_final_trabalho.sort_values(by=["Curso", "Turma"]).reset_index(drop=True)
+    for index, row in df_final_trabalho.iterrows():
+        cnpjs_parsed = parse_cnpjs(str(row["CNPJs"]))
+        df_final_trabalho.at[index, "CNPJs"] = formatar_cnpjs_agrupados(cnpjs_parsed, str(row["CNPJs"]), str(row["UFs"]))
 
 df_base_original = pd.DataFrame()
 arquivo = st.file_uploader("📤 Porta de Entrada", type=["xlsx"])
@@ -270,7 +220,11 @@ if arquivo:
             mapa = {c: "UF" if str(c).upper() in ["UF", "ESTADO"] else "CNPJ" if str(c).upper() in ["CNPJ", "CLIENTE"] else "Qtde" if str(c).upper() in ["QTDE", "QUANTIDADE", "ALUNOS"] else "Status" if str(c).upper() in ["STATUS", "SITUACAO", "SITUAÇÃO"] else "Curso" if str(c).upper() in ["CURSO", "NOME DO CURSO"] else c for c in df_raw.columns}
             df_raw = df_raw.rename(columns=mapa)
             
+            # TRAVA DE SEGURANÇA NO PANDAS: Impede que linhas com dados em branco sejam deletadas na conta
+            df_raw = df_raw.fillna("Não Informado")
+            
             if "Qtde" in df_raw.columns:
+                # O errors=coerce converte lixo em NaN, e o fillna(0) transforma em 0, não perdendo a linha
                 df_raw["Qtde"] = pd.to_numeric(df_raw["Qtde"], errors='coerce').fillna(0).astype(int)
             
             for _, r in df_raw.iterrows():
@@ -294,17 +248,13 @@ if arquivo:
                         t["Alunos"] += len(aloc)
                         t["UFs"] = merge_strings_list(t["UFs"], ",".join([g["UF"] for g in aloc]))
                         t["Arquivo"] = merge_strings_list(t.get("Arquivo", ""), arquivo.name)
-                        
                         c_dict = parse_cnpjs(t["CNPJs"])
                         for g in aloc: c_dict[g["CNPJ"]] = c_dict.get(g["CNPJ"], 0) + 1
-                        
-                        # Formata de forma segura na inserção de novos alunos na turma existente
                         t["CNPJs"] = formatar_cnpjs_agrupados(c_dict, t.get("CNPJs", ""), t["UFs"])
-                        
                         s_dict = {}
                         for p in str(t["Status"]).split("|"):
                             if ":" in p: k, v = p.split(":"); s_dict[higienizar_status(k)] = int(v)
-                        for g in aloc: s_dict[g["Status"]] = s_dict.get(g["Status"], 0) + 1
+                        for g in aloc: s_dict[g["Status"]] = s_dict.get(g["Status"], 0) + int(1)
                         t["Status"] = "|".join([f"{k}:{v}" for k, v in s_dict.items()])
 
                 while elementos:
@@ -314,12 +264,10 @@ if arquivo:
                     for g in aloc: 
                         c_dict[g["CNPJ"]] = c_dict.get(g["CNPJ"], 0) + 1
                         s_dict[g["Status"]] = s_dict.get(g["Status"], 0) + 1
-                    
                     uf_agrupada = ",".join(set(g["UF"] for g in aloc))
                     turmas_estado.append({
                         "Curso": curso, "Turma": f"{curso[:3].upper()}-{len([x for x in turmas_estado if x['Curso']==curso])+1:02d}",
                         "Alunos": len(aloc), "UFs": uf_agrupada,
-                        # Formata agrupando na criação
                         "CNPJs": formatar_cnpjs_agrupados(c_dict, "", uf_agrupada),
                         "Status": "|".join([f"{k}:{v}" for k, v in s_dict.items()]), "Arquivo": arquivo.name
                     })
@@ -329,26 +277,10 @@ if arquivo:
                 if "id" in t: del t["id"]
             init_connection().table("planejamentos_turmas").insert(turmas_estado).execute()
             st.session_state.dados_salvos = carregar_do_banco(); st.rerun()
-        except Exception as e: st.error(f"Erro: {e}")
+        except Exception as e: st.error(f"Erro ao processar: {e}")
 
 # =========================
-# GESTOR DE ARQUIVOS
-# =========================
-if not df_final_trabalho.empty:
-    with st.expander("📂 Gerenciar Arquivos Consolidados"):
-        arqs = set()
-        for v in df_final_trabalho["Arquivo"].dropna():
-            for p in str(v).split(","):
-                if p.strip() and p.strip() != "nan": arqs.add(p.strip())
-        for a in sorted(arqs):
-            c1, c2 = st.columns([8, 1])
-            c1.write(f"📄 {a}")
-            if c2.button("❌", key=f"del_{a}"):
-                init_connection().table("planejamentos_turmas").delete().ilike("Arquivo", f"%{a}%").execute()
-                st.session_state.dados_salvos = carregar_do_banco(); st.rerun()
-
-# =========================
-# PAINEL DE INDICADORES (KPIs)
+# INDICADORES E TABELA
 # =========================
 if not df_final_trabalho.empty:
     st.divider()
@@ -356,227 +288,107 @@ if not df_final_trabalho.empty:
     st.metric("Total Geral de Alunos", df_final_trabalho["Alunos"].sum())
     c1, c2 = st.columns(2)
     with c1:
-        with st.expander("🎓 Resumo por Curso (Turmas e Alunos)", expanded=True):
+        with st.expander("🎓 Resumo por Curso", expanded=True):
             resumo = df_final_trabalho.groupby("Curso").agg(Alunos=('Alunos', 'sum'), Turmas=('Turma', 'count')).reset_index()
-            st.write(f"**Total Geral:** {resumo['Turmas'].sum()} turmas")
             st.dataframe(resumo, hide_index=True, use_container_width=True)
     with c2:
-        with st.expander("📋 Alunos por Tipo de Solicitação", expanded=True):
+        with st.expander("📋 Solicitações", expanded=True):
             status_totals = {}
             for _, row in df_final_trabalho.iterrows():
                 for p in str(row["Status"]).split("|"):
                     if ":" in p:
-                        k, v = p.split(":"); k = higienizar_status(k)
-                        status_totals[k] = status_totals.get(k, 0) + int(v)
-            for k, v in sorted(status_totals.items()): st.write(f"**{k}:** {v} alunos")
+                        k, v = p.split(":"); status_totals[higienizar_status(k)] = status_totals.get(higienizar_status(k), 0) + int(v)
+            for k, v in sorted(status_totals.items()): st.write(f"**{k}:** {v}")
 
-    # =========================
-    # TABELA: VAGAS POR CURSO E UF
-    # =========================
-    with st.expander("🗺️ Distribuição de Vagas por Curso e Estado (UF)", expanded=False):
-        vagas_curso_uf = []
-        for _, row in df_final_trabalho.iterrows():
-            curso_atual = row["Curso"]
-            string_cnpjs_celula = str(row["CNPJs"])
-            row_ufs = str(row.get("UFs", ""))
-            cnpjs_dict = parse_cnpjs(string_cnpjs_celula)
-            
-            for cnpj, qtd in cnpjs_dict.items():
-                uf_atual = obter_uf_cnpj_seguro(cnpj, string_cnpjs_celula, row_ufs)
-                vagas_curso_uf.append({"Curso": curso_atual, "UF": uf_atual, "Vagas": qtd})
-
-        if vagas_curso_uf:
-            df_vagas = pd.DataFrame(vagas_curso_uf)
-            df_pivot = df_vagas.groupby(["UF", "Curso"])["Vagas"].sum().unstack(fill_value=0)
-            
-            st.write("**Quantidade de Vagas Solicitadas:**")
-            st.dataframe(df_pivot, use_container_width=True)
-        else:
-            st.info("Nenhuma vaga mapeada encontrada.")
-
-    # =========================
-    # TABELA PRINCIPAL E DOWNLOAD IMEDIATO
-    # =========================
+    # TABELA PRINCIPAL
     st.divider()
-    st.subheader("📚 Planejamento e Logística de Turmas")
-    colunas_ok = ["Curso", "Turma", "Alunos", "UFs", "CNPJs"]
     plano_editado = st.data_editor(
-        df_final_trabalho[colunas_ok],
-        column_config={
-            "Curso": st.column_config.TextColumn("Curso", disabled=True),
-            "Alunos": st.column_config.NumberColumn("Alunos", disabled=True),
-            "CNPJs": st.column_config.TextColumn("CNPJs", width=1000),
-            "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium", disabled=True)
-        },
+        df_final_trabalho[["Curso", "Turma", "Alunos", "UFs", "CNPJs"]],
+        column_config={"CNPJs": st.column_config.TextColumn("CNPJs", width=1000)},
         use_container_width=True, hide_index=True, key="editor_principal"
     )
 
-    st.download_button("📥 Baixar Planilha Principal (Excel Completo)", 
-                       data=gerar_excel_final(plano_editado, df_base_original), 
-                       file_name="planejamento_senac.xlsx")
-
-    # =========================
-    # SALVAMENTO AUTOMÁTICO E RECALCULO UFs/ALUNOS
-    # =========================
+    # SALVAMENTO AUTOMÁTICO
     dict_editado = plano_editado.to_dict("records")
     current_hash = hash(str(dict_editado))
-    
-    if "last_saved_hash" not in st.session_state: 
-        st.session_state.last_saved_hash = current_hash
-        
+    if "last_saved_hash" not in st.session_state: st.session_state.last_saved_hash = current_hash
     if current_hash != st.session_state.last_saved_hash:
         st.session_state.last_saved_hash = current_hash
         db_data = []
-        for i, row in plano_editado.iterrows():
-            linha_original = df_final_trabalho[(df_final_trabalho["Curso"] == row["Curso"]) & (df_final_trabalho["Turma"] == row["Turma"])]
-            
-            if not linha_original.empty:
-                orig = linha_original.iloc[0]
-            else:
-                orig = {"Status": "Aguardando Atendimento:0", "Arquivo": "", "UFs": row.get("UFs", "")}
-            
+        for row in dict_editado:
+            orig = df_final_trabalho[(df_final_trabalho["Curso"] == row["Curso"]) & (df_final_trabalho["Turma"] == row["Turma"])].iloc[0]
             dados_cnpj = parse_cnpjs(str(row["CNPJs"]))
-            novo_total_alunos = sum(dados_cnpj.values())
+            novo_total = sum(dados_cnpj.values())
             
-            novas_ufs_detectadas = []
+            detectadas = []
             for c in dados_cnpj.keys():
-                c_clean = str(c).strip()
-                if c_clean.endswith(".0"): c_clean = c_clean[:-2]
-                uf_ref = st.session_state.mapa_cnpj_uf.get(c_clean)
-                if uf_ref:
-                    for u in str(uf_ref).split(","):
-                        if u.strip() and u.strip() != "nan":
-                            novas_ufs_detectadas.append(u.strip())
-            
-            nova_uf_str = ", ".join(sorted(set(novas_ufs_detectadas))) if novas_ufs_detectadas else orig["UFs"]
-            
-            # Formata inteligentemente antes de salvar (Isso resolve os antigos sem corromper)
-            cnpjs_final_str = formatar_cnpjs_agrupados(dados_cnpj, str(row["CNPJs"]), nova_uf_str)
+                uf_r = obter_uf_cnpj_seguro(c, str(row["CNPJs"]), row["UFs"])
+                if uf_r != "N/I": detectadas.append(uf_r)
+            nova_uf_str = ", ".join(sorted(set(detectadas))) if detectadas else row["UFs"]
             
             db_data.append({
-                "Curso": row["Curso"], "Turma": row["Turma"], 
-                "Alunos": int(novo_total_alunos),
-                "UFs": nova_uf_str, 
-                "CNPJs": cnpjs_final_str, 
+                "Curso": row["Curso"], "Turma": row["Turma"], "Alunos": int(novo_total),
+                "UFs": nova_uf_str, "CNPJs": formatar_cnpjs_agrupados(dados_cnpj, str(row["CNPJs"]), nova_uf_str),
                 "Status": orig["Status"], "Arquivo": orig["Arquivo"]
             })
-            
         salvar_background(db_data, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-        st.session_state.dados_salvos = pd.DataFrame(db_data)
-        st.rerun()
-
-    # =========================
-    # ASSISTENTE E LOCALIZADOR
-    # =========================
-    st.divider()
-    col_l, col_r = st.columns(2)
-    with col_l:
-        st.subheader("🔍 Localizador de CNPJ")
-        busca = st.text_input("CNPJ:")
-        if busca:
-            res = plano_editado[plano_editado["CNPJs"].astype(str).str.contains(busca)]
-            if not res.empty:
-                st.dataframe(res[["Curso", "Turma", "UFs"]], hide_index=True)
-            else:
-                st.warning("Não encontrado")
-    with col_r:
-        st.subheader("🔄 Assistente de Remanejamento")
-        baixas = plano_editado[plano_editado["Alunos"] < min_alunos]
-        baixas = baixas[~baixas["Turma"].isin(st.session_state.turmas_ignoradas)]
-        if not baixas.empty:
-            for _, t_b in baixas.iterrows():
-                with st.expander(f"Resolver: {t_b['Turma']}"):
-                    acao = st.radio("Ação:", ["Fundir", "Distribuir", "Ignorar"], key=f"ac_{t_b['Turma']}")
-                    if acao == "Fundir":
-                        cands = plano_editado[(plano_editado["Curso"] == t_b["Curso"]) & (plano_editado["Turma"] != t_b["Turma"])]
-                        dest = st.selectbox("Destino:", cands["Turma"], key=f"dest_{t_b['Turma']}")
-                        if st.button("Confirmar Fusão", key=f"btn_f_{t_b['Turma']}"):
-                            fundir_turmas(t_b["Turma"], dest, t_b["Curso"], st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-                            st.session_state.dados_salvos = carregar_do_banco(); st.rerun()
-                    elif acao == "Distribuir":
-                        if st.button("Confirmar Distribuição", key=f"btn_d_{t_b['Turma']}"):
-                            distribuir_turma(t_b["Turma"], t_b["Curso"], st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-                            st.session_state.dados_salvos = carregar_do_banco(); st.rerun()
-                    else:
-                        if st.button("Ocultar Alerta", key=f"btn_i_{t_b['Turma']}"):
-                            st.session_state.turmas_ignoradas.append(t_b["Turma"]); st.rerun()
-        else: st.success("Tudo em conformidade!")
+        st.session_state.dados_salvos = pd.DataFrame(db_data); st.rerun()
 
     # =========================
     # RELATÓRIO: AGUARDANDO ATENDIMENTO
     # =========================
     st.divider()
-    with st.expander("📄 Relatório de CNPJs (Aguardando atendimento)", expanded=True):
-        st.write("CNPJs e quantidades de alunos com status 'Aguardando Atendimento', detalhados por UF e Curso.")
+    with st.expander("📄 Relatório de Aguardando Atendimento", expanded=True):
+        status_alvo = "Aguardando Atendimento"
+        lista_pendencias = []
+        for index, row in df_final_trabalho.iterrows():
+            status_raw = str(row.get("Status", ""))
+            qtd_aguardando = 0
+            for p in status_raw.split("|"):
+                if ":" in p:
+                    label, valor = p.split(":")
+                    if higienizar_status(label) == status_alvo: qtd_aguardando = int(valor)
 
-        if not df_final_trabalho.empty:
-            status_alvo = "Aguardando Atendimento"
-            lista_pendencias = []
-
-            for index, row in df_final_trabalho.iterrows():
-                status_raw, qtd_aguardando_linha = str(row.get("Status", "")), 0
-                for p in status_raw.split("|"):
-                    if ":" in p:
-                        label, valor = p.split(":")
-                        if higienizar_status(label) == status_alvo:
-                            qtd_aguardando_linha = int(valor)
-
-                if qtd_aguardando_linha > 0:
-                    string_original = str(row.get("CNPJs", ""))
-                    row_ufs = str(row.get("UFs", ""))
-                    cnpjs_na_linha = parse_cnpjs(string_original)
-                    total_alunos_linha = sum(cnpjs_na_linha.values())
-                    fator = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
-                    
-                    curso_linha = str(row.get("Curso", "Não Informado"))
-
-                    for cnpj, qtd_cnpj in cnpjs_na_linha.items():
-                        pendencia_calculada = round(qtd_cnpj * fator)
-                        if pendencia_calculada > 0:
-                            uf_real = obter_uf_cnpj_seguro(cnpj, string_original, row_ufs)
-
-                            lista_pendencias.append({
-                                "Curso": curso_linha,
-                                "UF": uf_real, 
-                                "CNPJ": cnpj, 
-                                "Qtd": pendencia_calculada
-                            })
-
-            if lista_pendencias:
-                # Agrupa os dados
-                df_detalhe = pd.DataFrame(lista_pendencias).groupby(["Curso", "UF", "CNPJ"], as_index=False)["Qtd"].sum()
+            if qtd_aguardando > 0:
+                string_original = str(row.get("CNPJs", ""))
+                cnpjs_na_linha = parse_cnpjs(string_original)
+                total_alunos_linha = sum(cnpjs_na_linha.values())
+                fator = qtd_aguardando / total_alunos_linha if total_alunos_linha > 0 else 0
                 
-                # Prepara o Resumo com Curso e UF
-                df_total_uf = df_detalhe.groupby(["Curso", "UF"])["Qtd"].sum().reset_index()
-                df_total_uf.columns = ["Curso", "UF", "Total Aguardando"]
-                df_total_uf = df_total_uf.sort_values(by=["Curso", "UF"])
+                for cnpj, qtd_cnpj in cnpjs_na_linha.items():
+                    pendencia_calc = round(qtd_cnpj * fator)
+                    if pendencia_calc > 0:
+                        uf_real = obter_uf_cnpj_seguro(cnpj, string_original, row["UFs"])
+                        lista_pendencias.append({
+                            "Curso": str(row["Curso"]),
+                            "UF": uf_real, 
+                            "CNPJ": cnpj, 
+                            "Qtd": pendencia_calc
+                        })
 
-                st.write("**Total de Vagas por Curso e UF:**")
-                for _, row_uf in df_total_uf.iterrows():
-                    st.write(f"📍 **{row_uf['Curso']} ({row_uf['UF']}):** {int(row_uf['Total Aguardando'])} vagas")
-                
-                st.divider()
-                st.write("**Detalhamento por Cliente e Curso:**")
-                
-                # Configurações de exibição na tela
-                colunas_exibicao = ["Curso", "UF", "CNPJ", "Qtd"]
-                df_exibicao = df_detalhe[colunas_exibicao].sort_values(by=["Curso", "UF", "Qtd"], ascending=[True, True, False])
-                st.dataframe(df_exibicao, use_container_width=True, hide_index=True)
+        if lista_pendencias:
+            df_detalhe = pd.DataFrame(lista_pendencias)
+            df_total_uf = df_detalhe.groupby(["Curso", "UF"])["Qtd"].sum().reset_index()
+            df_total_uf.columns = ["Curso", "UF", "Vagas Aguardando"]
 
-                # Função de exportação para Excel formatada para Cobrança
-                def gerar_excel_pendencias_completo(df_d, df_t):
-                    output = BytesIO()
-                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                        # Força explicitamente a ordem das colunas no Excel: Curso, UF, Dados
-                        df_t[["Curso", "UF", "Total Aguardando"]].to_excel(writer, index=False, sheet_name="Resumo_Curso_UF")
-                        df_d[["Curso", "UF", "CNPJ", "Qtd"]].sort_values(by=["Curso", "UF", "Qtd"], ascending=[True, True, False]).to_excel(writer, index=False, sheet_name="Detalhe_por_CNPJ")
-                    return output.getvalue()
+            st.write("**Resumo das Pendências:**")
+            for _, r_uf in df_total_uf.iterrows():
+                st.write(f"📍 **{r_uf['Curso']} ({r_uf['UF']}):** {int(r_uf['Vagas Aguardando'])} vagas")
+            
+            st.divider()
+            st.dataframe(df_detalhe[["Curso", "UF", "CNPJ", "Qtd"]].sort_values(["Curso", "UF"]), use_container_width=True, hide_index=True)
 
-                st.download_button(
-                    label="📥 Baixar Relatório Completo (Resumo + Detalhe)",
-                    data=gerar_excel_pendencias_completo(df_detalhe, df_total_uf),
-                    file_name="relatorio_aguardando_atendimento.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.info("Nenhuma pendência encontrada.")
+            def gerar_excel_pendencias(df_d, df_t):
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                    df_t[["Curso", "UF", "Vagas Aguardando"]].to_excel(writer, index=False, sheet_name="Resumo_Curso_UF")
+                    df_d[["Curso", "UF", "CNPJ", "Qtd"]].to_excel(writer, index=False, sheet_name="Detalhe_por_CNPJ")
+                return output.getvalue()
+
+            st.download_button(
+                label="📥 Baixar Relatório com Nomes dos Cursos",
+                data=gerar_excel_pendencias(df_detalhe, df_total_uf),
+                file_name="relatorio_aguardando_atendimento.xlsx"
+            )
+        else:
+            st.info("Nenhuma pendência encontrada.")
