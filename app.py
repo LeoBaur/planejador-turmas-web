@@ -214,7 +214,7 @@ if "dados_salvos" not in st.session_state:
 st.title("📊 Planejador Inteligente de Turmas")
 df_final_trabalho = st.session_state.dados_salvos.copy()
 
-# AJUSTE 1: Fixando a ordem da planilha para evitar pulos quando a página recarregar
+# Fixando a ordem da planilha para evitar pulos quando a página recarregar
 if not df_final_trabalho.empty:
     df_final_trabalho = df_final_trabalho.sort_values(by=["Curso", "Turma"]).reset_index(drop=True)
 
@@ -322,6 +322,29 @@ if not df_final_trabalho.empty:
                         status_totals[k] = status_totals.get(k, 0) + int(v)
             for k, v in sorted(status_totals.items()): st.write(f"**{k}:** {v} alunos")
 
+    # --- INÍCIO DA NOVA SESSÃO: VAGAS POR CURSO E UF (APENAS TABELA) ---
+    with st.expander("🗺️ Distribuição de Vagas por Curso e Estado (UF)", expanded=False):
+        vagas_curso_uf = []
+        for _, row in df_final_trabalho.iterrows():
+            curso_atual = row["Curso"]
+            cnpjs_dict = parse_cnpjs(str(row["CNPJs"]))
+            for cnpj, qtd in cnpjs_dict.items():
+                c_clean = clean_key(cnpj)
+                uf_ref = st.session_state.mapa_cnpj_uf.get(c_clean, "N/A")
+                uf_atual = str(uf_ref).split(",")[0].strip() if uf_ref else "N/A"
+                vagas_curso_uf.append({"Curso": curso_atual, "UF": uf_atual, "Vagas": qtd})
+
+        if vagas_curso_uf:
+            df_vagas = pd.DataFrame(vagas_curso_uf)
+            # Agrupa colocando UF como linha (índice lateral) e Cursos no cabeçalho (colunas)
+            df_pivot = df_vagas.groupby(["UF", "Curso"])["Vagas"].sum().unstack(fill_value=0)
+            
+            st.write("**Quantidade de Vagas Solicitadas:**")
+            st.dataframe(df_pivot, use_container_width=True)
+        else:
+            st.info("Nenhuma vaga mapeada encontrada.")
+    # --- FIM DA NOVA SESSÃO ---
+
     # =========================
     # TABELA PRINCIPAL E DOWNLOAD IMEDIATO
     # =========================
@@ -356,7 +379,7 @@ if not df_final_trabalho.empty:
         st.session_state.last_saved_hash = current_hash
         db_data = []
         for i, row in plano_editado.iterrows():
-            # AJUSTE: Buscar a linha original exatamente pelo Curso e Turma
+            # Buscar a linha original exatamente pelo Curso e Turma
             linha_original = df_final_trabalho[(df_final_trabalho["Curso"] == row["Curso"]) & (df_final_trabalho["Turma"] == row["Turma"])]
             
             if not linha_original.empty:
