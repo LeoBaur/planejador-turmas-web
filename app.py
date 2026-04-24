@@ -57,6 +57,22 @@ def clean_key(k):
         s = s[:-2]
     return s
 
+# Função unificada e robusta para descobrir a UF de um CNPJ específico
+def descobrir_uf_cnpj(cnpj, row_ufs):
+    c_clean = clean_key(cnpj)
+    uf_ref = st.session_state.mapa_cnpj_uf.get(c_clean)
+    
+    # Se encontrou no mapa de memória, retorna a UF correta
+    if uf_ref and str(uf_ref).strip() not in ["", "nan", "N/A", "None"]:
+        return str(uf_ref).split(",")[0].strip()
+    
+    # Fallback inteligente: se a turma inteira só tem 1 UF, o CNPJ com certeza é dela
+    ufs_turma = [u.strip() for u in str(row_ufs).split(",") if u.strip() and u.strip() != "nan"]
+    if len(ufs_turma) == 1:
+        return ufs_turma[0]
+    
+    return "Não Informado"
+
 # =========================
 # LÓGICA DE STRINGS E PARSERS
 # =========================
@@ -329,11 +345,12 @@ if not df_final_trabalho.empty:
         vagas_curso_uf = []
         for _, row in df_final_trabalho.iterrows():
             curso_atual = row["Curso"]
+            row_ufs = str(row.get("UFs", ""))
             cnpjs_dict = parse_cnpjs(str(row["CNPJs"]))
+            
             for cnpj, qtd in cnpjs_dict.items():
-                c_clean = clean_key(cnpj)
-                uf_ref = st.session_state.mapa_cnpj_uf.get(c_clean, "N/A")
-                uf_atual = str(uf_ref).split(",")[0].strip() if uf_ref else "N/A"
+                # Usa a função blindada para achar a UF real do CNPJ
+                uf_atual = descobrir_uf_cnpj(cnpj, row_ufs)
                 vagas_curso_uf.append({"Curso": curso_atual, "UF": uf_atual, "Vagas": qtd})
 
         if vagas_curso_uf:
@@ -473,18 +490,15 @@ if not df_final_trabalho.empty:
                     cnpjs_na_linha = parse_cnpjs(row.get("CNPJs", ""))
                     total_alunos_linha = sum(cnpjs_na_linha.values())
                     fator = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
+                    
                     curso_linha = str(row.get("Curso", "Não Informado"))
+                    row_ufs = str(row.get("UFs", ""))
 
                     for cnpj, qtd_cnpj in cnpjs_na_linha.items():
                         pendencia_calculada = round(qtd_cnpj * fator)
                         if pendencia_calculada > 0:
-                            # NOVA LÓGICA DE BUSCA INDIVIDUAL DA UF PARA O RELATÓRIO
-                            c_clean_rel = clean_key(cnpj)
-                            uf_ref_rel = st.session_state.mapa_cnpj_uf.get(c_clean_rel)
-                            if uf_ref_rel and uf_ref_rel != "nan":
-                                uf_real = str(uf_ref_rel).split(",")[0].strip()
-                            else:
-                                uf_real = "Não Informado"
+                            # Usa a função blindada para achar a UF real do CNPJ
+                            uf_real = descobrir_uf_cnpj(cnpj, row_ufs)
 
                             lista_pendencias.append({
                                 "Curso": curso_linha,
