@@ -50,35 +50,37 @@ def salvar_background(dados_dict, url, key):
     except Exception:
         pass
 
-# Função para garantir que os CNPJs sejam comparados de forma exata (sem .0 ou espaços)
 def clean_key(k):
     s = str(k).strip().upper()
     if s.endswith(".0"): 
         s = s[:-2]
     return s
 
-# Função unificada e robusta para descobrir a UF de um CNPJ específico
-def descobrir_uf_cnpj(cnpj, row_ufs):
+# NOVA FUNÇÃO SEGURA: Busca a UF sem interferir nas turmas mescladas
+def obter_uf_cnpj_seguro(cnpj, string_original=""):
     c_clean = clean_key(cnpj)
     uf_ref = st.session_state.mapa_cnpj_uf.get(c_clean)
     
-    if uf_ref and str(uf_ref).strip() not in ["", "nan", "N/A", "None"]:
+    # 1. Tenta achar na memória principal
+    if uf_ref and str(uf_ref).strip() not in ["", "nan", "None", "N/A"]:
         return str(uf_ref).split(",")[0].strip()
     
-    ufs_turma = [u.strip() for u in str(row_ufs).split(",") if u.strip() and u.strip() != "nan"]
-    if len(ufs_turma) == 1:
-        return ufs_turma[0]
-    
-    return "N/I"
+    # 2. Tenta ler diretamente do texto da célula se estiver no formato (10 - SP)
+    if string_original:
+        match = re.search(re.escape(cnpj) + r"\s*\(\d+\s*-\s*([A-Za-z]{2})\)", string_original)
+        if match:
+            return match.group(1).upper()
+            
+    return "Não Informado"
 
-# Função NOVA: Formata os CNPJs garantindo que fiquem agrupados/ordenados pela UF
-def formatar_cnpjs_agrupados(cnpj_dict, fallback_ufs=""):
+# FUNÇÃO DE FORMATAÇÃO: Ordena alfabeticamente pela UF e depois pelo CNPJ
+def formatar_cnpjs_agrupados(cnpj_dict, string_original=""):
     itens = []
     for cnpj, qtd in cnpj_dict.items():
-        uf = descobrir_uf_cnpj(cnpj, fallback_ufs)
+        uf = obter_uf_cnpj_seguro(cnpj, string_original)
         itens.append((uf, cnpj, qtd))
     
-    # Ordena primeiro pela UF (x[0]), depois pelo CNPJ (x[1])
+    # Ordena: Primeiro a UF, depois o CNPJ
     itens.sort(key=lambda x: (x[0], x[1]))
     
     res = []
@@ -99,7 +101,7 @@ def parse_cnpjs(cnpj_str):
     for p in str(cnpj_str).split(","):
         p = p.strip()
         if not p: continue
-        # Ignora a UF ao ler os dados antigos, pois ela será gerada dinamicamente e de forma limpa depois
+        # Regex atualizado que entende e ignora a UF para não quebrar a contagem matemática
         match = re.match(r"(.+?)\s*\((\d+).*?\)", p)
         if match:
             c, q = match.group(1).strip(), int(match.group(2))
@@ -112,7 +114,7 @@ def merge_cnpjs_str(s1, s2):
     d1 = parse_cnpjs(s1)
     for k, v in parse_cnpjs(s2).items():
         d1[k] = d1.get(k, 0) + v
-    return formatar_cnpjs_agrupados(d1, "")
+    return formatar_cnpjs_agrupados(d1)
 
 def merge_strings_list(s1, s2):
     l1 = [x.strip() for x in str(s1).split(",") if x.strip() and x.strip() != "nan"]
@@ -177,7 +179,6 @@ def distribuir_turma(nome_origem, curso, url, key):
 if 'autenticado' not in st.session_state: 
     st.session_state.autenticado = False
 
-# Verificação de persistência de login (2 horas = 7200 segundos)
 if not st.session_state.autenticado and "login_time" in st.query_params:
     try:
         if time.time() - float(st.query_params["login_time"]) < 7200:
@@ -230,7 +231,6 @@ def carregar_do_banco():
 
 if "dados_salvos" not in st.session_state:
     st.session_state.dados_salvos = carregar_do_banco()
-    # Popula o mapa de UFs a partir do banco para reconhecer mesmo sem subir arquivo
     if not st.session_state.dados_salvos.empty:
         for _, row_db in st.session_state.dados_salvos.iterrows():
             ufs_banco = [u.strip() for u in str(row_db.get("UFs", "")).split(",") if u.strip() and u.strip() != "nan"]
@@ -247,7 +247,6 @@ if "dados_salvos" not in st.session_state:
 st.title("📊 Planejador Inteligente de Turmas")
 df_final_trabalho = st.session_state.dados_salvos.copy()
 
-# Fixando a ordem da planilha para evitar pulos quando a página recarregar
 if not df_final_trabalho.empty:
     df_final_trabalho = df_final_trabalho.sort_values(by=["Curso", "Turma"]).reset_index(drop=True)
 
@@ -290,8 +289,8 @@ if arquivo:
                         c_dict = parse_cnpjs(t["CNPJs"])
                         for g in aloc: c_dict[g["CNPJ"]] = c_dict.get(g["CNPJ"], 0) + 1
                         
-                        # Usando a nova função para alinhar e ordenar por UF
-                        t["CNPJs"] = formatar_cnpjs_agrupados(c_dict, t['UFs'])
+                        # Formata agrupando os UFs de forma limpa
+                        t["CNPJs"] = formatar_cnpjs_agrupados(c_dict, t.get("CNPJs", ""))
                         
                         s_dict = {}
                         for p in str(t["Status"]).split("|"):
@@ -311,8 +310,8 @@ if arquivo:
                     turmas_estado.append({
                         "Curso": curso, "Turma": f"{curso[:3].upper()}-{len([x for x in turmas_estado if x['Curso']==curso])+1:02d}",
                         "Alunos": len(aloc), "UFs": uf_agrupada,
-                        # Usando a nova função para alinhar e ordenar por UF
-                        "CNPJs": formatar_cnpjs_agrupados(c_dict, uf_agrupada),
+                        # Formata agrupando na criação
+                        "CNPJs": formatar_cnpjs_agrupados(c_dict, ""),
                         "Status": "|".join([f"{k}:{v}" for k, v in s_dict.items()]), "Arquivo": arquivo.name
                     })
 
@@ -369,11 +368,12 @@ if not df_final_trabalho.empty:
         vagas_curso_uf = []
         for _, row in df_final_trabalho.iterrows():
             curso_atual = row["Curso"]
-            row_ufs = str(row.get("UFs", ""))
-            cnpjs_dict = parse_cnpjs(str(row["CNPJs"]))
+            string_cnpjs_celula = str(row["CNPJs"])
+            cnpjs_dict = parse_cnpjs(string_cnpjs_celula)
             
             for cnpj, qtd in cnpjs_dict.items():
-                uf_atual = descobrir_uf_cnpj(cnpj, row_ufs)
+                # Usa a função blindada
+                uf_atual = obter_uf_cnpj_seguro(cnpj, string_cnpjs_celula)
                 vagas_curso_uf.append({"Curso": curso_atual, "UF": uf_atual, "Vagas": qtd})
 
         if vagas_curso_uf:
@@ -441,8 +441,8 @@ if not df_final_trabalho.empty:
             
             nova_uf_str = ", ".join(sorted(set(novas_ufs_detectadas))) if novas_ufs_detectadas else orig["UFs"]
             
-            # Chama a função inteligente de formatação antes de salvar no banco
-            cnpjs_final_str = formatar_cnpjs_agrupados(dados_cnpj, nova_uf_str)
+            # Chama a função inteligente de ordenamento por UF antes de salvar no banco
+            cnpjs_final_str = formatar_cnpjs_agrupados(dados_cnpj, str(row["CNPJs"]))
             
             db_data.append({
                 "Curso": row["Curso"], "Turma": row["Turma"], 
@@ -513,17 +513,18 @@ if not df_final_trabalho.empty:
                             qtd_aguardando_linha = int(valor)
 
                 if qtd_aguardando_linha > 0:
-                    cnpjs_na_linha = parse_cnpjs(row.get("CNPJs", ""))
+                    string_original = str(row.get("CNPJs", ""))
+                    cnpjs_na_linha = parse_cnpjs(string_original)
                     total_alunos_linha = sum(cnpjs_na_linha.values())
                     fator = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
                     
                     curso_linha = str(row.get("Curso", "Não Informado"))
-                    row_ufs = str(row.get("UFs", ""))
 
                     for cnpj, qtd_cnpj in cnpjs_na_linha.items():
                         pendencia_calculada = round(qtd_cnpj * fator)
                         if pendencia_calculada > 0:
-                            uf_real = descobrir_uf_cnpj(cnpj, row_ufs)
+                            # Chama a função blindada que usa a memória ou a própria célula pra achar a UF
+                            uf_real = obter_uf_cnpj_seguro(cnpj, string_original)
 
                             lista_pendencias.append({
                                 "Curso": curso_linha,
