@@ -356,7 +356,13 @@ if not df_final_trabalho.empty:
         st.session_state.last_saved_hash = current_hash
         db_data = []
         for i, row in plano_editado.iterrows():
-            orig = df_final_trabalho.iloc[i]
+            # AJUSTE: Buscar a linha original exatamente pelo Curso e Turma
+            linha_original = df_final_trabalho[(df_final_trabalho["Curso"] == row["Curso"]) & (df_final_trabalho["Turma"] == row["Turma"])]
+            
+            if not linha_original.empty:
+                orig = linha_original.iloc[0]
+            else:
+                orig = {"Status": "Aguardando Atendimento:0", "Arquivo": "", "UFs": row.get("UFs", "")}
             
             dados_cnpj = parse_cnpjs(str(row["CNPJs"]))
             novo_total_alunos = sum(dados_cnpj.values())
