@@ -559,11 +559,13 @@ if not df_final_trabalho.empty:
                         cnpjs_lista = list(cnpjs_na_linha.items())
 
                         for i, (cnpj, qtd_cnpj) in enumerate(cnpjs_lista):
-                            # O último CNPJ da fila absorve a diferença exata para a conta não perder nenhuma vaga por arredondamento
                             if i == len(cnpjs_lista) - 1:
                                 pendencia_calculada = qtd_aguardando_linha - vagas_alocadas
                             else:
                                 pendencia_calculada = round(qtd_cnpj * fator)
+                                # Trava de segurança: impede que o arredondamento aloque mais vagas do que o total disponível
+                                if vagas_alocadas + pendencia_calculada > qtd_aguardando_linha:
+                                    pendencia_calculada = qtd_aguardando_linha - vagas_alocadas
                                 vagas_alocadas += pendencia_calculada
 
                             if pendencia_calculada > 0:
