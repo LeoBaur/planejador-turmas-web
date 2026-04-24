@@ -322,7 +322,9 @@ if not df_final_trabalho.empty:
                         status_totals[k] = status_totals.get(k, 0) + int(v)
             for k, v in sorted(status_totals.items()): st.write(f"**{k}:** {v} alunos")
 
-    # --- INÍCIO DA NOVA SESSÃO: VAGAS POR CURSO E UF (APENAS TABELA) ---
+    # =========================
+    # TABELA: VAGAS POR CURSO E UF
+    # =========================
     with st.expander("🗺️ Distribuição de Vagas por Curso e Estado (UF)", expanded=False):
         vagas_curso_uf = []
         for _, row in df_final_trabalho.iterrows():
@@ -336,14 +338,12 @@ if not df_final_trabalho.empty:
 
         if vagas_curso_uf:
             df_vagas = pd.DataFrame(vagas_curso_uf)
-            # Agrupa colocando UF como linha (índice lateral) e Cursos no cabeçalho (colunas)
             df_pivot = df_vagas.groupby(["UF", "Curso"])["Vagas"].sum().unstack(fill_value=0)
             
             st.write("**Quantidade de Vagas Solicitadas:**")
             st.dataframe(df_pivot, use_container_width=True)
         else:
             st.info("Nenhuma vaga mapeada encontrada.")
-    # --- FIM DA NOVA SESSÃO ---
 
     # =========================
     # TABELA PRINCIPAL E DOWNLOAD IMEDIATO
@@ -379,7 +379,6 @@ if not df_final_trabalho.empty:
         st.session_state.last_saved_hash = current_hash
         db_data = []
         for i, row in plano_editado.iterrows():
-            # Buscar a linha original exatamente pelo Curso e Turma
             linha_original = df_final_trabalho[(df_final_trabalho["Curso"] == row["Curso"]) & (df_final_trabalho["Turma"] == row["Turma"])]
             
             if not linha_original.empty:
@@ -474,15 +473,22 @@ if not df_final_trabalho.empty:
                     cnpjs_na_linha = parse_cnpjs(row.get("CNPJs", ""))
                     total_alunos_linha = sum(cnpjs_na_linha.values())
                     fator = qtd_aguardando_linha / total_alunos_linha if total_alunos_linha > 0 else 0
-                    uf_linha = str(row.get("UFs", "N/A")).split(",")[0].strip()
                     curso_linha = str(row.get("Curso", "Não Informado"))
 
                     for cnpj, qtd_cnpj in cnpjs_na_linha.items():
                         pendencia_calculada = round(qtd_cnpj * fator)
                         if pendencia_calculada > 0:
+                            # NOVA LÓGICA DE BUSCA INDIVIDUAL DA UF PARA O RELATÓRIO
+                            c_clean_rel = clean_key(cnpj)
+                            uf_ref_rel = st.session_state.mapa_cnpj_uf.get(c_clean_rel)
+                            if uf_ref_rel and uf_ref_rel != "nan":
+                                uf_real = str(uf_ref_rel).split(",")[0].strip()
+                            else:
+                                uf_real = "Não Informado"
+
                             lista_pendencias.append({
                                 "Curso": curso_linha,
-                                "UF": uf_linha, 
+                                "UF": uf_real, 
                                 "CNPJ": cnpj, 
                                 "Qtd": pendencia_calculada
                             })
