@@ -112,7 +112,10 @@ def merge_cnpjs_str(s1, s2):
     d1 = parse_cnpjs(s1)
     for k, v in parse_cnpjs(s2).items():
         d1[k] = d1.get(k, 0) + v
-    return formatar_cnpjs_agrupados(d1)
+    
+    # AJUSTE CIRÚRGICO: Concatena os textos de origem e destino para a UF viajar junto com o CNPJ no remanejamento
+    string_combinada = str(s1) + " | " + str(s2)
+    return formatar_cnpjs_agrupados(d1, string_combinada)
 
 def merge_strings_list(s1, s2):
     l1 = [x.strip() for x in str(s1).split(",") if x.strip() and x.strip() != "nan"]
@@ -464,6 +467,9 @@ if not df_final_trabalho.empty:
             
             novo_status_atualizado = "|".join([f"{k}:{v}" for k, v in s_dict_salvar.items()])
             
+            # AJUSTE CIRÚRGICO: Combina os textos para nunca perder o contexto da UF numa edição
+            string_busca_uf = str(row["CNPJs"]) + " | " + str(orig.get("CNPJs", ""))
+            
             novas_ufs_detectadas = []
             for c in dados_cnpj.keys():
                 c_clean = str(c).strip()
@@ -473,10 +479,15 @@ if not df_final_trabalho.empty:
                     for u in str(uf_ref).split(","):
                         if u.strip() and u.strip() != "nan":
                             novas_ufs_detectadas.append(u.strip())
+                
+                # NOVO: Se falhar a memória, caça diretamente no texto combinado
+                uf_txt = obter_uf_cnpj_seguro(c, string_busca_uf, "")
+                if uf_txt != "N/I" and uf_txt not in novas_ufs_detectadas:
+                    novas_ufs_detectadas.append(uf_txt)
             
-            nova_uf_str = ", ".join(sorted(set(novas_ufs_detectadas))) if novas_ufs_detectadas else orig["UFs"]
+            nova_uf_str = ", ".join(sorted(set(novas_ufs_detectadas))) if novas_ufs_detectadas else row.get("UFs", "")
             
-            cnpjs_final_str = formatar_cnpjs_agrupados(dados_cnpj, str(row["CNPJs"]), nova_uf_str)
+            cnpjs_final_str = formatar_cnpjs_agrupados(dados_cnpj, string_busca_uf, nova_uf_str)
             
             db_data.append({
                 "Curso": row["Curso"], "Turma": row["Turma"], 
@@ -563,7 +574,6 @@ if not df_final_trabalho.empty:
                                 pendencia_calculada = qtd_aguardando_linha - vagas_alocadas
                             else:
                                 pendencia_calculada = round(qtd_cnpj * fator)
-                                # Trava de segurança: impede que o arredondamento aloque mais vagas do que o total disponível
                                 if vagas_alocadas + pendencia_calculada > qtd_aguardando_linha:
                                     pendencia_calculada = qtd_aguardando_linha - vagas_alocadas
                                 vagas_alocadas += pendencia_calculada
