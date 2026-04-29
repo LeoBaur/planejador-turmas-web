@@ -42,11 +42,12 @@ def higienizar_status(status_str):
         return "Não Informado"
     return " ".join(str(status_str).split()).title()
 
-def salvar_background(dados_dict, url, key):
+def salvar_background(dados_list, url, key):
     try:
         client = create_client(url, key)
-        client.table("planejamentos_turmas").delete().neq("Curso", "0").execute()
-        client.table("planejamentos_turmas").insert(dados_dict).execute()
+        # O comando delete() foi completamente removido daqui!
+        # Agora usamos UPSERT, que procura o 'id' e apenas ATUALIZA a linha no banco.
+        client.table("planejamentos_turmas").upsert(dados_list).execute()
     except Exception:
         pass
 
@@ -101,20 +102,16 @@ def parse_cnpjs(cnpj_str):
         p = p.strip()
         if not p: continue
         
-        # 1. Tenta o padrão correto ou com parênteses bagunçados: "CNPJ (30 - PR)" ou "CNPJ ( 30"
         match_padrao = re.search(r"(.+?)\s*[\(\[]\s*(\d+)", p)
         if match_padrao:
             c, q = match_padrao.group(1).strip(), int(match_padrao.group(2))
             res[c] = res.get(c, 0) + q
         else:
-            # 2. Tenta um padrão sem parênteses: "CNPJ 30 PR" ou "CNPJ - 30"
             match_fallback = re.search(r"^(.*?)\s+(\d+)\s*(?:[A-Za-z]{2}|[-])?$", p)
             if match_fallback:
                 c, q = match_fallback.group(1).strip(), int(match_fallback.group(2))
                 res[c] = res.get(c, 0) + q
             else:
-                # 3. Trava de segurança: Se não achar número nenhum, assume 1 em vez de 0 
-                # para não destruir os indicadores e apagar os alunos da turma.
                 res[p] = res.get(p, 0) + 1 
     return res
 
@@ -159,8 +156,8 @@ def fundir_turmas(nome_origem, nome_destino, curso, url, key):
         client.table("planejamentos_turmas").update({
             "Alunos": novos_alunos, "CNPJs": novos_cnpjs, "UFs": novas_ufs,
             "Arquivo": novos_arqs, "Status": novo_status
-        }).eq("id", destino["id"]).execute()
-        client.table("planejamentos_turmas").delete().eq("id", origem["id"]).execute()
+        }).eq("id", int(destino["id"])).execute()
+        client.table("planejamentos_turmas").delete().eq("id", int(origem["id"])).execute()
 
 def distribuir_turma(nome_origem, curso, url, key):
     client = create_client(url, key)
@@ -180,8 +177,8 @@ def distribuir_turma(nome_origem, curso, url, key):
             "UFs": merge_strings_list(dest["UFs"], origem["UFs"]),
             "CNPJs": merge_cnpjs_str(dest["CNPJs"], origem["CNPJs"]),
             "Status": str(dest["Status"]) + "|" + str(origem["Status"])
-        }).eq("id", dest["id"]).execute()
-    client.table("planejamentos_turmas").delete().eq("id", origem["id"]).execute()
+        }).eq("id", int(dest["id"])).execute()
+    client.table("planejamentos_turmas").delete().eq("id", int(origem["id"])).execute()
 
 # =========================
 # LOGIN E BANCO DE DADOS
@@ -219,7 +216,8 @@ with st.sidebar:
         st.divider()
         min_alunos = st.number_input("Mínimo", min_value=1, value=25)
         max_alunos = st.number_input("Máximo", min_value=1, value=45)
-        if st.button("🚨 Resetar Banco"):
+        # O botão de Resetar é o único lugar seguro onde a tabela pode ser limpa manualmente
+        if st.button("🚨 Resetar Banco (Limpar Tudo)"):
             create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"]).table("planejamentos_turmas").delete().neq("Curso", "0").execute()
             st.session_state.mapa_cnpj_uf = {}
             st.session_state.dados_salvos = pd.DataFrame(); st.rerun()
@@ -264,7 +262,6 @@ df_base_original = pd.DataFrame()
 arquivo = st.file_uploader("📤 Porta de Entrada", type=["xlsx"])
 
 if arquivo:
-    # BOTÃO ATUALIZADO: Agora é um sincronizador inteligente
     if st.button("🚀 Processar e Sincronizar Base", type="primary"):
         try:
             df_raw = pd.read_excel(arquivo, dtype=str) 
@@ -284,7 +281,6 @@ if arquivo:
 
             df_motor = df_raw.groupby(["Curso", "UF", "CNPJ", "Status"], as_index=False)["Qtde"].sum()
 
-            # 1. MAPEAMENTO DO ESTADO ATUAL (Memória do remanejamento)
             mapeamento_alocacao = {}
             for _, row in df_final_trabalho.iterrows():
                 curso_atual = row["Curso"]
@@ -296,7 +292,6 @@ if arquivo:
                         mapeamento_alocacao[chave] = []
                     mapeamento_alocacao[chave].append({"Turma": turma_atual, "capacidade": qtd})
 
-            # 2. DESCONSTRUIR O NOVO EXCEL (A Verdade Absoluta)
             elementos_por_curso = {}
             for _, r in df_motor.iterrows():
                 curso = r["Curso"]
@@ -306,7 +301,6 @@ if arquivo:
             novas_turmas_dict = {}
             elementos_nao_alocados = {c: [] for c in elementos_por_curso}
 
-            # 3. PRIMEIRA PASSAGEM: Encaixar alunos nas turmas onde já estavam
             for curso, elementos in elementos_por_curso.items():
                 for el in elementos:
                     chave_map = (curso, clean_key(el["CNPJ"]))
@@ -325,7 +319,6 @@ if arquivo:
                     if not alocado:
                         elementos_nao_alocados[curso].append(el)
 
-            # 4. SEGUNDA PASSAGEM: Alocar alunos excedentes ou novas vagas
             for curso, elementos in elementos_nao_alocados.items():
                 for el in elementos:
                     alocado = False
@@ -350,7 +343,6 @@ if arquivo:
                         nova_turma_nome = f"{curso[:3].upper()}-{max_num+1:02d}"
                         novas_turmas_dict[(curso, nova_turma_nome)] = [el]
 
-            # 5. MONTAR A LISTA FINAL (Se algo não estiver no novo Excel, simplesmente some daqui)
             turmas_estado = []
             for (curso, turma_nome), elementos in novas_turmas_dict.items():
                 if not elementos: continue
@@ -376,7 +368,7 @@ if arquivo:
                     "Arquivo": arquivo.name
                 })
 
-            init_connection().table("planejamentos_turmas").delete().neq("Curso", "0").execute()
+            # Aqui o delete foi removido! Se novas turmas forem geradas, elas serão ADICIONADAS.
             if turmas_estado:
                 init_connection().table("planejamentos_turmas").insert(turmas_estado).execute()
                 
@@ -476,7 +468,8 @@ if not df_final_trabalho.empty:
     plano_editado = st.data_editor(
         df_final_trabalho[colunas_ok],
         column_config={
-            "Curso": st.column_config.TextColumn("Curso", disabled=True),
+            # AQUI ESTÁ A MÁGICA: A coluna curso agora permite edições!
+            "Curso": st.column_config.TextColumn("Curso", disabled=False), 
             "Alunos": st.column_config.NumberColumn("Alunos", disabled=True),
             "CNPJs": st.column_config.TextColumn("CNPJs", width=1000),
             "UFs": st.column_config.TextColumn("Estados (UFs)", width="medium", disabled=True)
@@ -500,13 +493,11 @@ if not df_final_trabalho.empty:
     if current_hash != st.session_state.last_saved_hash:
         st.session_state.last_saved_hash = current_hash
         db_data = []
+        
         for i, row in plano_editado.iterrows():
-            linha_original = df_final_trabalho[(df_final_trabalho["Curso"] == row["Curso"]) & (df_final_trabalho["Turma"] == row["Turma"])]
-            
-            if not linha_original.empty:
-                orig = linha_original.iloc[0]
-            else:
-                orig = {"Status": "Aguardando Atendimento:0", "Arquivo": "", "UFs": row.get("UFs", "")}
+            # A MAIOR PROTEÇÃO: Agora vinculamos a edição usando a POSIÇÃO EXATA (Índice), 
+            # garantindo que encontramos o ID mesmo se você mudar o nome do Curso.
+            orig = df_final_trabalho.iloc[i] 
             
             dados_cnpj = parse_cnpjs(str(row["CNPJs"]))
             novo_total_alunos = sum(dados_cnpj.values())
@@ -523,15 +514,12 @@ if not df_final_trabalho.empty:
             if total_status_antigo != novo_total_alunos:
                 dif = novo_total_alunos - total_status_antigo
                 
-                # Se AUMENTOU o número de alunos
                 if dif > 0:
                     if s_dict_salvar:
                         maior = max(s_dict_salvar, key=s_dict_salvar.get)
                         s_dict_salvar[maior] += dif
                     else:
                         s_dict_salvar["Aguardando Atendimento"] = dif
-                
-                # Se DIMINUIU o número de alunos
                 else: 
                     dif_abs = abs(dif)
                     while dif_abs > 0 and s_dict_salvar:
@@ -543,10 +531,8 @@ if not df_final_trabalho.empty:
                             dif_abs -= s_dict_salvar[maior]
                             s_dict_salvar[maior] = 0
                         
-                        # Remove os status que foram zerados
                         s_dict_salvar = {k: v for k, v in s_dict_salvar.items() if v > 0}
                     
-                    # Se zerou todos os status mas ainda tem aluno, recria o status padrão
                     if not s_dict_salvar and novo_total_alunos > 0:
                         s_dict_salvar["Aguardando Atendimento"] = novo_total_alunos
             
@@ -568,20 +554,23 @@ if not df_final_trabalho.empty:
                 if uf_txt != "N/I" and uf_txt not in novas_ufs_detectadas:
                     novas_ufs_detectadas.append(uf_txt)
             
-            nova_uf_str = ", ".join(sorted(set(novas_ufs_detectadas))) if novas_ufs_detectadas else row.get("UFs", "")
+            nova_uf_str = ", ".join(sorted(set(novas_ufs_detectadas))) if novas_ufs_detectadas else orig.get("UFs", "")
             
             cnpjs_final_str = formatar_cnpjs_agrupados(dados_cnpj, string_busca_uf, nova_uf_str)
             
+            # ATUALIZAÇÃO SEGURA: Enviando o ID para o banco fazer apenas "Update"
             db_data.append({
-                "Curso": row["Curso"], "Turma": row["Turma"], 
+                "id": int(orig["id"]), # <-- Isso é o que evita criar linhas duplicadas ou apagar
+                "Curso": row["Curso"], # <-- O novo curso que você editou
+                "Turma": orig["Turma"], 
                 "Alunos": int(novo_total_alunos),
                 "UFs": nova_uf_str, 
                 "CNPJs": cnpjs_final_str, 
-                "Status": novo_status_atualizado, "Arquivo": orig["Arquivo"]
+                "Status": novo_status_atualizado, "Arquivo": orig.get("Arquivo", "")
             })
             
         salvar_background(db_data, st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-        st.session_state.dados_salvos = pd.DataFrame(db_data)
+        st.session_state.dados_salvos = carregar_do_banco()
         st.rerun()
 
     # =========================
