@@ -100,12 +100,22 @@ def parse_cnpjs(cnpj_str):
     for p in str(cnpj_str).split(","):
         p = p.strip()
         if not p: continue
-        match = re.match(r"(.+?)\s*\((\d+).*?\)", p)
-        if match:
-            c, q = match.group(1).strip(), int(match.group(2))
+        
+        # 1. Tenta o padrão correto ou com parênteses bagunçados: "CNPJ (30 - PR)" ou "CNPJ ( 30"
+        match_padrao = re.search(r"(.+?)\s*[\(\[]\s*(\d+)", p)
+        if match_padrao:
+            c, q = match_padrao.group(1).strip(), int(match_padrao.group(2))
             res[c] = res.get(c, 0) + q
         else:
-            res[p] = res.get(p, 0) + 0 
+            # 2. Tenta um padrão sem parênteses: "CNPJ 30 PR" ou "CNPJ - 30"
+            match_fallback = re.search(r"^(.*?)\s+(\d+)\s*(?:[A-Za-z]{2}|[-])?$", p)
+            if match_fallback:
+                c, q = match_fallback.group(1).strip(), int(match_fallback.group(2))
+                res[c] = res.get(c, 0) + q
+            else:
+                # 3. Trava de segurança: Se não achar número nenhum, assume 1 em vez de 0 
+                # para não destruir os indicadores e apagar os alunos da turma.
+                res[p] = res.get(p, 0) + 1 
     return res
 
 def merge_cnpjs_str(s1, s2):
@@ -512,12 +522,33 @@ if not df_final_trabalho.empty:
             
             if total_status_antigo != novo_total_alunos:
                 dif = novo_total_alunos - total_status_antigo
-                if s_dict_salvar:
-                    maior = max(s_dict_salvar, key=s_dict_salvar.get)
-                    s_dict_salvar[maior] += dif
-                    if s_dict_salvar[maior] < 0: s_dict_salvar[maior] = 0
-                else:
-                    s_dict_salvar["Aguardando Atendimento"] = novo_total_alunos
+                
+                # Se AUMENTOU o número de alunos
+                if dif > 0:
+                    if s_dict_salvar:
+                        maior = max(s_dict_salvar, key=s_dict_salvar.get)
+                        s_dict_salvar[maior] += dif
+                    else:
+                        s_dict_salvar["Aguardando Atendimento"] = dif
+                
+                # Se DIMINUIU o número de alunos
+                else: 
+                    dif_abs = abs(dif)
+                    while dif_abs > 0 and s_dict_salvar:
+                        maior = max(s_dict_salvar, key=s_dict_salvar.get)
+                        if s_dict_salvar[maior] >= dif_abs:
+                            s_dict_salvar[maior] -= dif_abs
+                            dif_abs = 0
+                        else:
+                            dif_abs -= s_dict_salvar[maior]
+                            s_dict_salvar[maior] = 0
+                        
+                        # Remove os status que foram zerados
+                        s_dict_salvar = {k: v for k, v in s_dict_salvar.items() if v > 0}
+                    
+                    # Se zerou todos os status mas ainda tem aluno, recria o status padrão
+                    if not s_dict_salvar and novo_total_alunos > 0:
+                        s_dict_salvar["Aguardando Atendimento"] = novo_total_alunos
             
             novo_status_atualizado = "|".join([f"{k}:{v}" for k, v in s_dict_salvar.items()])
             
